@@ -1,24 +1,46 @@
 #!/bin/bash
 
-# 从命令行参数中获取需要查找和替换的IP地址
-ip_addr="$1"
+function replace_ip() {
+    local file="$1"
+    local ip="$2"
+    if [ -f "$file" ]; then
+        sed -i "s/192\.168\.[0-9]\{1,3\}/${ip}/g" "$file"
+        echo "已经成功修改 $file 文件"
+    elif [ ! -f "$file" ]; then
+        echo "$file 文件不存在，开始下载"
+        curl -fsSL "http://gh.zxi7.cn/https://raw.githubusercontent.com/YoYulyvW/tese/master/${file}" -o "$file"
+        if [ -f "$file" ]; then
+            sed -i "s/192\.168\.[0-9]\{1,3\}/${ip}/g" "$file"
+            echo "已经成功修改 $file 文件"
+        fi
+    fi
+}
 
-# 如果没有传递命令行参数，则使用默认值
-if [ -z "$ip_addr" ]; then
-    ip_addr="192.168.243"
-    echo "没有传入ip, 将使用默认的:${ip_addr}"
+# 获取用户输入的IP地址
+read -p "请输入要修改的IP地址(前3位) [默认为192.168.1.240]: " ip_addr
+
+if [ -n "$ip_addr" ]; then
+    if [[ "$ip_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        ip_addr=$(echo "$ip_addr" | cut -d "." -f 1-3)
+    else
+        echo "输入的IP地址不合法，使用默认值！"
+        ip_addr="192.168.1.240"
+    fi
+else
+    ip_addr="192.168.1.240"
 fi
 
-# 查找并替换/root/openvpn-install.sh文件中的IP地址
-if [ -f "/root/openvpn-install.sh" ]; then
-    sed -i "s/192\.168\.[0-9]\{1,3\}/${ip_addr}/g" /root/openvpn-install.sh
-    echo "已经成功修改 /root/openvpn-install.sh 文件"
-fi
+# 查找并替换openvpn-install.sh文件中的IP地址
+replace_ip "/root/openvpn-install.sh" "$ip_addr"
 
-# 查找并替换/root/openvpn-install-v6.sh文件中的IP地址
-if [ -f "/root/openvpn-install-v6.sh" ]; then
-    sed -i "s/192\.168\.[0-9]\{1,3\}/${ip_addr}/g" /root/openvpn-install-v6.sh
-    echo "已经成功修改 /root/openvpn-install-v6.sh 文件"
-fi
+# 查找并替换openvpn-install-v6.sh文件中的IP地址
+replace_ip "/root/openvpn-install-v6.sh" "$ip_addr"
 
 echo "已经修改ip为:${ip_addr}.x"
+
+if dpkg -l docker-ce | grep -q "^ii"; then
+    echo "Docker已安装"
+else
+    echo "Docker未安装，开始安装"
+    curl -sSL https://get.daocloud.io/docker | sh
+fi
