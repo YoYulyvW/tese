@@ -21,4 +21,4 @@ if [ -f "/root/openvpn-install-v6.sh" ]; then
     echo "已经成功修改 /root/openvpn-install-v6.sh 文件"
 fi
 
-echo "已经修改ip为:${ip_addr}"
+echo "已经修改ip为:${ip_addr}.x"
