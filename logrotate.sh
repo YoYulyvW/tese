@@ -6,6 +6,8 @@ then
     apt-get install logrotate
 fi
 
+cat /dev/null > /var/log/daemon.log && cat /dev/null > /var/log/syslog
+
 # Create configuration file
 tee /etc/logrotate.d/daemon-syslog << EOF
 /var/log/daemon.log /var/log/syslog {
