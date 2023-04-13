@@ -24,17 +24,20 @@ function replace_ip() {
 }
 
 # 获取用户输入的IP地址
-read -p "请输入要修改的IP地址(前3位) [默认为192.168.1.240]: " ip_addr
+echo 
+echo "脚本内默认为192.168.254.0/24"
+echo "请输入要修改的IP地址(前3位)例:192.168.250"
+read -p " [留空回车使用默认值]: " ip_addr
 
 if [ -n "$ip_addr" ]; then
     if [[ "$ip_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         ip_addr=$(echo "$ip_addr" | cut -d "." -f 1-3)
     else
         echo "输入的IP地址不合法，使用默认值！"
-        ip_addr="192.168.1.240"
+        ip_addr="192.168.254"
     fi
 else
-    ip_addr="192.168.1.240"
+    ip_addr="192.168.254"
 fi
 
 # 查找并替换openvpn-install.sh文件中的IP地址
