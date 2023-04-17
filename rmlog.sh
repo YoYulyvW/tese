@@ -12,6 +12,6 @@ echo "*/10 * * * * root cat /dev/null > /var/log/daemon.log && cat /dev/null > /
 echo "已添加crontab定时任务，每10分钟清空/var/log/daemon.log和/var/log/syslog文件。"
 
 # 重启cron服务，使修改生效
-systemctl restart cron
+service cron restart
 
 echo "已重启cron服务，使修改生效。"
