@@ -1,19 +1,28 @@
 #!/bin/bash
 
-#设置要屏蔽的关键词
-keywords=("systemd-logind: New session" "Created slice" "Starting Session" "Started Session" "Wi-Fi" "hostapd")
+# 检查当前系统是否是Armbian
+if [ $(grep -c "Armbian" /etc/os-release) -eq 0 ]; then
+    echo "该脚本仅适用于Armbian系统。"
+    exit 1
+fi
 
-#将关键词转换为rsyslog配置格式
-rules=""
-for keyword in "${keywords[@]}"; do
-  rules+=":msg, contains, \"$keyword\" ~"$'\n'
-done
+# 清空原始文件
+> /var/log/daemon.log
+> /var/log/syslog
 
-#添加屏蔽规则到rsyslog配置文件
-sed -i "/# Log anything (except mail) of level info or higher./a $rules    daemon.*;mail.*;syslog;\
-        news.err;\
-        *.=debug;*.=info;\
-        *.=notice;*.=warn   /dev/null" /etc/rsyslog.conf
+# 备份原始文件
+cp /var/log/daemon.log /var/log/daemon.log.bak
+cp /var/log/syslog /var/log/syslog.bak
 
-#重启rsyslog服务
-systemctl restart rsyslog
+
+# 创建新的空文件
+touch /var/log/daemon.log
+touch /var/log/syslog
+
+# 设置新文件权限，只允许root和adm用户读取和写入
+chown root:adm /var/log/daemon.log
+chown root:adm /var/log/syslog
+chmod 640 /var/log/daemon.log
+chmod 640 /var/log/syslog
+
+echo "已屏蔽/var/log/daemon.log和/var/log/syslog文件的写入日志，并清空了这两个文件。"
