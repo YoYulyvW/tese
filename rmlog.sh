@@ -26,7 +26,7 @@ fi
 timedatectl set-ntp false
 
 # 时区设置
-dpkg-reconfigure tzdata
+#dpkg-reconfigure tzdata
 
 # 语言环境配置
 sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
