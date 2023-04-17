@@ -11,18 +11,13 @@ fi
 > /var/log/syslog
 
 # 备份原始文件
-cp /var/log/daemon.log /var/log/daemon.log.bak
-cp /var/log/syslog /var/log/syslog.bak
+cp /etc/rsyslog.conf /etc/rsyslog.conf.bak
 
+# 修改rsyslog.conf文件，屏蔽/var/log/daemon.log和/var/log/syslog文件的写入日志
+sed -i '/^daemon\.log/ s/^/#/' /etc/rsyslog.conf
+sed -i '/^syslog/ s/^/#/' /etc/rsyslog.conf
 
-# 创建新的空文件
-touch /var/log/daemon.log
-touch /var/log/syslog
+# 重启rsyslog服务
+systemctl restart rsyslog
 
-# 设置新文件权限，只允许root和adm用户读取和写入
-chown root:adm /var/log/daemon.log
-chown root:adm /var/log/syslog
-chmod 640 /var/log/daemon.log
-chmod 640 /var/log/syslog
-
-echo "已屏蔽/var/log/daemon.log和/var/log/syslog文件的写入日志，并清空了这两个文件。"
+echo "已修改/etc/rsyslog.conf文件，屏蔽了/var/log/daemon.log和/var/log/syslog文件的写入日志。"
