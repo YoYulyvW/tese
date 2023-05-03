@@ -1,4 +1,23 @@
 #!/bin/bash
+# -*- coding: UTF-8 -*-
+
+# 备份原软件源列表
+cp /etc/apt/sources.list /etc/apt/sources.list.backup
+
+# 替换软件源为阿里云镜像
+cat <<EOT > /etc/apt/sources.list
+# Armbian buster
+deb http://mirrors.aliyun.com/armbian-buster main buster-utils buster-desktop
+#deb-src http://apt.armbian.com buster main buster-utils buster-desktop
+
+# Armbian buster-updates, security patches
+deb http://mirrors.aliyun.com/armbian-buster-updates main buster-utils buster-desktop
+#deb-src http://apt.armbian.com buster-updates main buster-utils buster-desktop
+
+# Armbian buster-backports, new features
+deb http://mirrors.aliyun.com/armbian-buster-backports main buster-utils buster-desktop
+#deb-src http://apt.armbian.com buster-backports main buster-utils buster-desktop
+EOT
 
 function replace_ip() {
     local file="$1"
