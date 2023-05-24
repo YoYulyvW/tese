@@ -6,17 +6,15 @@ cp /etc/apt/sources.list /etc/apt/sources.list.backup
 
 # 替换软件源为阿里云镜像
 cat <<EOT > /etc/apt/sources.list
-# Armbian buster
-deb http://mirrors.aliyun.com/armbian-buster main buster-utils buster-desktop
-#deb-src http://apt.armbian.com buster main buster-utils buster-desktop
-
-# Armbian buster-updates, security patches
-deb http://mirrors.aliyun.com/armbian-buster-updates main buster-utils buster-desktop
-#deb-src http://apt.armbian.com buster-updates main buster-utils buster-desktop
-
-# Armbian buster-backports, new features
-deb http://mirrors.aliyun.com/armbian-buster-backports main buster-utils buster-desktop
-#deb-src http://apt.armbian.com buster-backports main buster-utils buster-desktop
+## 默认禁用源码镜像以提高速度，如需启用请自行取消注释
+deb http://mirrors.aliyun.com/debian bullseye main contrib non-free
+# deb-src http://mirrors.aliyun.com/debian bullseye main contrib non-free
+deb http://mirrors.aliyun.com/debian bullseye-updates main contrib non-free
+# deb-src http://mirrors.aliyun.com/debian bullseye-updates main contrib non-free
+deb http://mirrors.aliyun.com/debian bullseye-backports main contrib non-free
+# deb-src http://mirrors.aliyun.com/debian bullseye-backports main contrib non-free
+deb http://mirrors.aliyun.com/debian-security bullseye-security main contrib non-free
+# deb-src http://mirrors.aliyun.com/debian-security bullseye-security main contrib non-free
 EOT
 
 function replace_ip() {
