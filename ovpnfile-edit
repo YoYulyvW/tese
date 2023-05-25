@@ -17,6 +17,23 @@ deb http://mirrors.aliyun.com/debian-security bullseye-security main contrib non
 # deb-src http://mirrors.aliyun.com/debian-security bullseye-security main contrib non-free
 EOT
 
+apt install ntp
+# 修改系统时间 时区 
+cat <<EOT > /etc/systemd/system/ntp-sync.service
+[Unit]
+Description=NTP Synchronization
+After=network.target
+
+[Service]
+ExecStart=/usr/sbin/ntpd -g -u ntp:ntp -p /var/run/ntpd.pid
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOT
+ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo "Asia/Shanghai" > /etc/timezone
+systemctl enable ntp-sync.service && systemctl start ntp-sync.service
+
 function replace_ip() {
     local file="$1"
     local ip="$2"
