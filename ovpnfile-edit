@@ -53,6 +53,7 @@ function replace_ip() {
     fi
 
     sed -i "s/192\.168\.[0-9]\{1,3\}/${ip}/g" "$file_path"
+    sed -i 's|https://github.com|http://gh.zxi7.cn/https://github.com|g' "$file_path"
     echo "已经成功修改 $file 文件"
     echo
 }
