@@ -190,10 +190,10 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	echo "   4) OpenDNS"
 	echo "   5) Quad9"
 	echo "   6) AdGuard"
-	read -p "DNS server [1]: " dns
+	read -p "DNS server [2]: " dns
 	until [[ -z "$dns" || "$dns" =~ ^[1-6]$ ]]; do
 		echo "$dns: invalid selection."
-		read -p "DNS server [1]: " dns
+		read -p "DNS server [2]: " dns
 	done
 	echo
 	echo "Enter a name for the first client:"
@@ -307,8 +307,8 @@ server 192.168.248.0 255.255.255.0" > /etc/openvpn/server/server.conf
 			done
 		;;
 		2)
-			echo 'push "dhcp-option DNS 8.8.8.8"' >> /etc/openvpn/server/server.conf
 			echo 'push "dhcp-option DNS 8.8.4.4"' >> /etc/openvpn/server/server.conf
+			echo 'push "dhcp-option DNS 8.8.8.8"' >> /etc/openvpn/server/server.conf
 		;;
 		3)
 			echo 'push "dhcp-option DNS 1.1.1.1"' >> /etc/openvpn/server/server.conf
