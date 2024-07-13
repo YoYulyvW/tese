@@ -43,7 +43,7 @@ function replace_ip() {
         echo "修改 $file 文件 ..."
     elif [ ! -f "$file_path" ]; then
         echo "$file 文件不存在，开始下载 ..."
-        curl -sSL "https://raw.githubusercontent.com/YoYulyvW/tese/master/${file}" -o "$file_path"
+        curl -sSL "https://git.lyvw.top:4433/https://raw.githubusercontent.com/YoYulyvW/tese/master/${file}" -o "$file_path"
     fi
 
     if ! grep -q "^net.ipv4.ip_forward=1$" /etc/sysctl.conf; then
