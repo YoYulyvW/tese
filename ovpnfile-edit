@@ -88,7 +88,7 @@ if dpkg -l docker-ce | grep -q "^ii"; then
     echo "Docker已安装"
 else
     echo "Docker未安装，开始安装"
-    curl -sSL https://get.daocloud.io/docker | sh
+    curl -sSL https://git.lyvw.top:4433/https://raw.githubusercontent.com/YoYulyvW/tese/master/get-docker | sh
 fi
 
 echo
