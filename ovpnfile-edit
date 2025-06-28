@@ -1,21 +1,46 @@
 #!/bin/bash
 # -*- coding: UTF-8 -*-
 
-# 备份原软件源列表
-cp /etc/apt/sources.list /etc/apt/sources.list.backup
-
-# 替换软件源为阿里云镜像
-cat <<EOT > /etc/apt/sources.list
-## 默认禁用源码镜像以提高速度，如需启用请自行取消注释
-deb http://mirrors.aliyun.com/debian bullseye main contrib non-free
-# deb-src http://mirrors.aliyun.com/debian bullseye main contrib non-free
-deb http://mirrors.aliyun.com/debian bullseye-updates main contrib non-free
-# deb-src http://mirrors.aliyun.com/debian bullseye-updates main contrib non-free
-deb http://mirrors.aliyun.com/debian bullseye-backports main contrib non-free
-# deb-src http://mirrors.aliyun.com/debian bullseye-backports main contrib non-free
-deb http://mirrors.aliyun.com/debian-security bullseye-security main contrib non-free
-# deb-src http://mirrors.aliyun.com/debian-security bullseye-security main contrib non-free
-EOT
+# 判断系统是否为Debian/Ubuntu/Armbian
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$ID" = "debian" ] || [ "$ID" = "ubuntu" ] || [ "$ID" = "armbian" ]; then
+        echo "检测到系统: $PRETTY_NAME"
+        
+        # 备份原有源列表
+        echo "正在备份原有源列表..."
+        cp /etc/apt/sources.list /etc/apt/sources.list.bak
+        
+        # 根据系统版本设置中科大源
+        if [ "$ID" = "debian" ]; then
+            echo "正在设置Debian中科大源..."
+            cat > /etc/apt/sources.list <<EOF
+deb https://mirrors.ustc.edu.cn/debian/ $VERSION_CODENAME main contrib non-free
+deb https://mirrors.ustc.edu.cn/debian/ $VERSION_CODENAME-updates main contrib non-free
+deb https://mirrors.ustc.edu.cn/debian/ $VERSION_CODENAME-backports main contrib non-free
+deb https://mirrors.ustc.edu.cn/debian-security/ $VERSION_CODENAME-security main contrib non-free
+EOF
+        else
+            echo "正在设置Ubuntu/Armbian中科大源..."
+            cat > /etc/apt/sources.list <<EOF
+deb https://mirrors.ustc.edu.cn/ubuntu/ $VERSION_CODENAME main restricted universe multiverse
+deb https://mirrors.ustc.edu.cn/ubuntu/ $VERSION_CODENAME-updates main restricted universe multiverse
+deb https://mirrors.ustc.edu.cn/ubuntu/ $VERSION_CODENAME-backports main restricted universe multiverse
+deb https://mirrors.ustc.edu.cn/ubuntu/ $VERSION_CODENAME-security main restricted universe multiverse
+EOF
+        fi
+        
+        echo "源已成功更改为中科大镜像源"
+        echo "正在更新软件包列表..."
+        apt update
+    else
+        echo "错误：此脚本仅适用于Debian/Ubuntu/Armbian系统"
+        exit 1
+    fi
+else
+    echo "错误：无法确定操作系统类型"
+    exit 1
+fi
 
 apt install ntp
 # 修改系统时间 时区 
