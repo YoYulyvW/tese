@@ -1,47 +1,106 @@
 #!/bin/bash
 # -*- coding: UTF-8 -*-
 
-# 判断系统是否为Debian/Ubuntu/Armbian
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    if [ "$ID" = "debian" ] || [ "$ID" = "ubuntu" ] || [ "$ID" = "armbian" ]; then
-        echo "检测到系统: $PRETTY_NAME"
-        
-        # 备份原有源列表
-        echo "正在备份原有源列表..."
-        cp /etc/apt/sources.list /etc/apt/sources.list.bak
-        
-        # 根据系统版本设置中科大源
-        if [ "$ID" = "debian" ]; then
-            echo "正在设置Debian中科大源..."
-            cat > /etc/apt/sources.list <<EOF
-deb https://mirrors.ustc.edu.cn/debian/ $VERSION_CODENAME main contrib non-free
-deb https://mirrors.ustc.edu.cn/debian/ $VERSION_CODENAME-updates main contrib non-free
-deb https://mirrors.ustc.edu.cn/debian/ $VERSION_CODENAME-backports main contrib non-free
-deb https://mirrors.ustc.edu.cn/debian-security/ $VERSION_CODENAME-security main contrib non-free
-EOF
-        else
-            echo "正在设置Ubuntu/Armbian中科大源..."
-            cat > /etc/apt/sources.list <<EOF
-deb https://mirrors.ustc.edu.cn/ubuntu/ $VERSION_CODENAME main restricted universe multiverse
-deb https://mirrors.ustc.edu.cn/ubuntu/ $VERSION_CODENAME-updates main restricted universe multiverse
-deb https://mirrors.ustc.edu.cn/ubuntu/ $VERSION_CODENAME-backports main restricted universe multiverse
-deb https://mirrors.ustc.edu.cn/ubuntu/ $VERSION_CODENAME-security main restricted universe multiverse
-EOF
-        fi
-        
-        echo "源已成功更改为中科大镜像源"
-        echo "正在更新软件包列表..."
-        apt update
-    else
-        echo "错误：此脚本仅适用于Debian/Ubuntu/Armbian系统"
+
+# Armbian/Ubuntu arm64 一键换源脚本
+# 功能：自动选择最佳源，支持中科大/清华/官方ports源
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+# 检查root权限
+check_root() {
+    if [ "$(id -u)" != "0" ]; then
+        echo -e "${RED}错误：此脚本必须用root权限运行！${NC}"
         exit 1
     fi
-else
-    echo "错误：无法确定操作系统类型"
-    exit 1
-fi
+}
 
+# 清理apt进程和锁文件
+clean_apt() {
+    echo -e "${YELLOW}[1/5] 正在清理apt进程...${NC}"
+    killall -9 apt apt-get 2>/dev/null
+    rm -f /var/lib/apt/lists/lock
+    rm -f /var/lib/dpkg/lock
+    rm -f /var/cache/apt/archives/lock
+}
+
+# 检测最佳镜像源
+detect_best_mirror() {
+    echo -e "${YELLOW}[2/5] 正在检测最佳镜像源...${NC}"
+    
+    # 测试连接速度
+    tuna_speed=$(curl -o /dev/null -s -w '%{speed_download}' https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/dists/jammy/Release | awk '{printf "%.0f", $1/1024}')
+    ustc_speed=$(curl -o /dev/null -s -w '%{speed_download}' https://mirrors.ustc.edu.cn/ubuntu-ports/dists/jammy/Release | awk '{printf "%.0f", $1/1024}')
+    
+    if [ "$tuna_speed" -gt "$ustc_speed" ]; then
+        echo -e "${GREEN}清华源速度更快 ($tuna_speed KB/s)，将使用清华源${NC}"
+        MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"
+    else
+        echo -e "${GREEN}中科大源速度更快 ($ustc_speed KB/s)，将使用中科大源${NC}"
+        MIRROR="https://mirrors.ustc.edu.cn/ubuntu-ports"
+    fi
+    
+    # 如果两个国内源都不可用，则使用官方ports源
+    if ! curl --connect-timeout 5 -s ${MIRROR}/ubuntu-ports/dists/jammy/Release > /dev/null; then
+        echo -e "${YELLOW}国内镜像不可用，将使用官方ports源${NC}"
+        MIRROR="http://ports.ubuntu.com/ubuntu-ports"
+    fi
+}
+
+# 替换系统源
+replace_sources() {
+    echo -e "${YELLOW}[3/5] 正在备份当前源...${NC}"
+    cp /etc/apt/sources.list /etc/apt/sources.list.bak
+    
+    echo -e "${YELLOW}[4/5] 正在写入新源...${NC}"
+    cat > /etc/apt/sources.list <<EOF
+# 默认注释源码仓库，如需启用请取消注释
+deb ${MIRROR} jammy main restricted universe multiverse
+# deb-src ${MIRROR} jammy main restricted universe multiverse
+
+deb ${MIRROR} jammy-updates main restricted universe multiverse
+# deb-src ${MIRROR} jammy-updates main restricted universe multiverse
+
+deb ${MIRROR} jammy-backports main restricted universe multiverse
+# deb-src ${MIRROR} jammy-backports main restricted universe multiverse
+
+deb ${MIRROR} jammy-security main restricted universe multiverse
+# deb-src ${MIRROR} jammy-security main restricted universe multiverse
+EOF
+}
+
+# 更新软件列表
+update_apt() {
+    echo -e "${YELLOW}[5/5] 正在更新软件列表...${NC}"
+    apt update 2>&1 | tee /tmp/apt_update.log
+    
+    if grep -q "Failed" /tmp/apt_update.log; then
+        echo -e "${RED}更新过程中出现错误：${NC}"
+        grep "Failed" /tmp/apt_update.log
+        echo -e "${YELLOW}尝试使用官方ports源...${NC}"
+        MIRROR="http://ports.ubuntu.com/ubuntu-ports"
+        replace_sources
+        apt update
+    fi
+}
+
+# 主执行流程
+main() {
+    check_root
+    clean_apt
+    detect_best_mirror
+    replace_sources
+    update_apt
+    
+    echo -e "${GREEN}\n源更换完成！当前使用镜像：${MIRROR}${NC}"
+    echo -e "可执行以下命令升级软件：${YELLOW}apt upgrade${NC}"
+}
+
+main
 apt install ntp
 # 修改系统时间 时区 
 cat <<EOT > /etc/systemd/system/ntp-sync.service
