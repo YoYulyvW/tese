@@ -100,23 +100,23 @@ main() {
     echo -e "可执行以下命令升级软件：${YELLOW}apt upgrade${NC}"
 }
 
-main
-apt install ntp
+#main
+#apt install ntp
 # 修改系统时间 时区 
-cat <<EOT > /etc/systemd/system/ntp-sync.service
-[Unit]
-Description=NTP Synchronization
-After=network.target
+#cat <<EOT > /etc/systemd/system/ntp-sync.service
+#[Unit]
+#Description=NTP Synchronization
+#After=network.target
 
-[Service]
-ExecStart=/usr/sbin/ntpd -g -u ntp:ntp -p /var/run/ntpd.pid
-Restart=always
+#[Service]
+#ExecStart=/usr/sbin/ntpd -g -u ntp:ntp -p /var/run/ntpd.pid
+#Restart=always
 
-[Install]
-WantedBy=multi-user.target
-EOT
-ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo "Asia/Shanghai" > /etc/timezone
-systemctl enable ntp-sync.service && systemctl start ntp-sync.service
+#[Install]
+#WantedBy=multi-user.target
+#EOT
+#ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo "Asia/Shanghai" > /etc/timezone
+#systemctl enable ntp-sync.service && systemctl start ntp-sync.service
 
 function replace_ip() {
     local file="$1"
