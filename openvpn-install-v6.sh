@@ -292,6 +292,7 @@ server 192.168.243.0 255.255.255.0" > /etc/openvpn/server/server.conf
 	#	echo 'push "redirect-gateway def1 ipv6 bypass-dhcp"' >> /etc/openvpn/server/server.conf
 	fi
 	echo 'ifconfig-pool-persist ipp.txt' >> /etc/openvpn/server/server.conf
+ 	echo 'push "redirect-gateway def1"' >> /etc/openvpn/server/server.conf
 	# DNS
 	case "$dns" in
 		1|"")
@@ -386,7 +387,6 @@ ExecStart=$iptables_path -t nat -A POSTROUTING -s 192.168.243.0/24 ! -d 192.168.
 ExecStart=$iptables_path -I INPUT -p $protocol --dport $port -j ACCEPT
 ExecStart=$iptables_path -I FORWARD -s 192.168.243.0/24 -j ACCEPT
 ExecStart=$iptables_path -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-ExecStop=$iptables_path -t nat -D POSTROUTING -s 192.168.243.0/24 ! -d 192.168.243.0/24 -j SNAT --to $ip
 ExecStop=$iptables_path -D INPUT -p $protocol --dport $port -j ACCEPT
 ExecStop=$iptables_path -D FORWARD -s 192.168.243.0/24 -j ACCEPT
 ExecStop=$iptables_path -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" > /etc/systemd/system/openvpn-iptables.service
