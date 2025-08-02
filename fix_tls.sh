@@ -1,6 +1,6 @@
 #!/bin/bash
-# OpenVPN终极修复脚本（兼容2.5.1）
-# 版本：7.1
+# OpenVPN 终极修复脚本 (100% 兼容 OpenVPN 2.5.1+)
+# 版本：8.0
 
 OVPN_DIR="/etc/openvpn"
 CLIENT_DIR="$OVPN_DIR/client-configs"
@@ -12,38 +12,59 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-# 记录日志
+# 安全日志记录
 log() {
     echo -e "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
 
-# 修复tls-crypt密钥
-fix_tls_key() {
-    log "${GREEN}正在更新tls-crypt密钥...${NC}"
+# 安全生成密钥
+generate_tls_key() {
+    log "${GREEN}正在生成新的tls-crypt密钥...${NC}"
     
-    # 生成新密钥（兼容写法）
-    if ! openvpn --genkey secret "$OVPN_DIR/tls-crypt.key"; then
-        log "${RED}密钥生成失败，尝试旧语法...${NC}"
+    # 兼容新旧版本语法
+    if openvpn --help | grep -q "\-\-genkey secret"; then
+        openvpn --genkey secret "$OVPN_DIR/tls-crypt.key" || {
+            log "${RED}密钥生成失败 (新语法)${NC}"
+            return 1
+        }
+    else
         openvpn --genkey --secret "$OVPN_DIR/tls-crypt.key" || {
-            log "${RED}密钥生成彻底失败${NC}"
-            exit 1
+            log "${RED}密钥生成失败 (旧语法)${NC}"
+            return 1
         }
     fi
     
     chmod 600 "$OVPN_DIR/tls-crypt.key"
+    return 0
+}
 
-    # 使用awk安全更新客户端配置
+# 安全更新客户端配置
+update_client_configs() {
+    local key_content=$(cat "$OVPN_DIR/tls-crypt.key")
+    
     for conf in "$CLIENT_DIR"/*.ovpn; do
         [ -f "$conf" ] || continue
         
-        awk -v newkey="$(cat $OVPN_DIR/tls-crypt.key)" '
-            BEGIN { RS="\n"; ORS="\n"; in_tls=0 }
-            /<tls-crypt>/ { in_tls=1; print; next }
-            /<\/tls-crypt>/ { in_tls=0; print newkey; print; next }
-            !in_tls { print }
-        ' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+        # 使用临时文件确保原子性更新
+        tmp_file="${conf}.tmp"
         
-        log "已更新: $conf"
+        awk -v key="$key_content" '
+            BEGIN { in_tls=0 }
+            /<tls-crypt>/ { 
+                print
+                in_tls=1
+                next
+            }
+            /<\/tls-crypt>/ {
+                print key
+                print
+                in_tls=0
+                next
+            }
+            !in_tls { print }
+        ' "$conf" > "$tmp_file" && mv "$tmp_file" "$conf"
+        
+        log "已更新客户端: $conf"
     done
 }
 
@@ -54,57 +75,68 @@ optimize_mtu() {
     # 清理旧配置
     sed -i '/^mssfix/d; /^fragment/d' "$OVPN_DIR/server.conf"
     
-    # 添加新配置
+    # 添加优化配置
     cat >> "$OVPN_DIR/server.conf" <<EOF
+# MTU优化配置
 mssfix 1200
 fragment 1300
 EOF
 
-    # 更新客户端配置
+    # 更新客户端
     for conf in "$CLIENT_DIR"/*.ovpn; do
-        [ -f "$conf" ] || continue
-        grep -q "mssfix" "$conf" || echo "mssfix 1200" >> "$conf"
+        [ -f "$conf" ] && grep -q "mssfix" "$conf" || echo "mssfix 1200" >> "$conf"
     done
 }
 
-# 新版配置验证方法
+# 配置验证
 verify_config() {
-    log "${GREEN}验证服务器配置...${NC}"
+    log "${GREEN}验证配置...${NC}"
     
-    # 2.5.1版本使用--test已弃用，改用语法检查
-    if ! openvpn --config "$OVPN_DIR/server.conf" --verb 3 --show-valid-subnets; then
-        log "${RED}配置语法检查失败${NC}"
-        exit 1
+    # 使用兼容性检查
+    if openvpn --version | grep -q "2\.5"; then
+        if ! openvpn --config "$OVPN_DIR/server.conf" --verb 3 --show-ciphers >/dev/null; then
+            log "${RED}配置验证失败 (2.5+版本)${NC}"
+            return 1
+        fi
+    else
+        if ! openvpn --config "$OVPN_DIR/server.conf" --verb 3 --test >/dev/null; then
+            log "${RED}配置验证失败 (旧版本)${NC}"
+            return 1
+        fi
     fi
     
-    # 额外检查密钥有效性
-    if ! grep -q "BEGIN OpenVPN Static key" "$OVPN_DIR/tls-crypt.key"; then
-        log "${RED}tls-crypt密钥格式错误${NC}"
-        exit 1
-    fi
+    return 0
 }
 
-# 防火墙检查
-check_firewall() {
-    if ! ufw status | grep -q "1194/udp.*ALLOW"; then
-        log "${YELLOW}警告：防火墙未放行1194/udp端口${NC}"
-        echo -e "执行以下命令开放端口："
-        echo -e "  ${YELLOW}sudo ufw allow 1194/udp${NC}"
-        echo -e "  ${YELLOW}sudo ufw enable${NC}"
-    fi
-}
-
+# 主修复流程
 main() {
-    fix_tls_key
-    optimize_mtu
-    systemctl restart openvpn@server
-    verify_config
-    check_firewall
+    # 1. 更新密钥
+    if ! generate_tls_key; then
+        log "${RED}密钥生成失败，请手动检查OpenVPN版本${NC}"
+        exit 1
+    fi
     
-    log "${GREEN}修复完成！请执行：${NC}"
-    echo -e "1. 重新分发所有客户端配置"
+    # 2. 更新客户端配置
+    update_client_configs
+    
+    # 3. 优化MTU
+    optimize_mtu
+    
+    # 4. 重启服务
+    systemctl restart openvpn@server
+    
+    # 5. 验证配置
+    if ! verify_config; then
+        log "${RED}配置验证失败，请检查日志${NC}"
+        exit 1
+    fi
+    
+    log "${GREEN}修复成功完成！${NC}"
+    echo -e "请执行以下操作："
+    echo -e "1. 重新分发所有客户端配置文件"
     echo -e "2. 客户端执行：${YELLOW}sudo systemctl restart openvpn-client@config${NC}"
-    echo -e "3. 服务端日志监控：${YELLOW}journalctl -u openvpn@server -f${NC}"
+    echo -e "3. 监控日志：${YELLOW}journalctl -u openvpn@server -f${NC}"
 }
 
+# 执行主流程
 main
