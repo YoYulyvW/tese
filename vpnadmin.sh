@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# 全自动OpenVPN管理脚本
-# 自动从Squid配置提取IP池，无需人工干预
+# 全自动OpenVPN用户管理脚本
+# 自动从Squid配置提取IP池，无需人工交互
 
-# 配置文件路径
+# 配置路径
 SQUID_CONF="/etc/squid/squid.conf"
 OPENVPN_DIR="/etc/openvpn"
 EASY_RSA_DIR="$OPENVPN_DIR/easy-rsa"
@@ -13,30 +13,24 @@ BASE_CONF="$CLIENT_DIR/base.conf"
 # 检查root权限
 [ "$(id -u)" != "0" ] && { echo "必须使用root运行"; exit 1; }
 
-# 安装依赖（无交互）
-install_deps() {
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get -qq update && apt-get -y install openvpn easy-rsa
-}
-
-# 自动化初始化PKI
+# 非交互式初始化PKI
 init_pki() {
+    echo "正在初始化PKI..."
     rm -rf "$EASY_RSA_DIR"
     make-cadir "$EASY_RSA_DIR"
     cd "$EASY_RSA_DIR" || exit
 
-    # 非交互式CA创建
-    expect <<EOF
-spawn ./easyrsa init-pki
-expect "Confirm removal:"
-send "yes\r"
-expect eof
+    # 创建vars文件避免交互
+    cat > vars <<EOF
+set_var EASYRSA_BATCH   "yes"
+set_var EASYRSA_REQ_CN  "VPN CA"
 EOF
 
     # 自动化构建CA和证书
-    ./easyrsa --batch build-ca nopass
+    ./easyrsa init-pki
+    ./easyrsa build-ca nopass
     ./easyrsa gen-dh
-    ./easyrsa --batch build-server-full server nopass
+    ./easyrsa build-server-full server nopass
     ./easyrsa gen-crl
 
     # 复制证书文件
@@ -44,28 +38,29 @@ EOF
     chmod 600 "$OPENVPN_DIR"/*.key
 }
 
-# 自动提取Squid IP池
-get_ip_pool() {
+# 自动提取并分配IP
+get_available_ip() {
+    # 从Squid配置提取IP池
     mapfile -t IP_POOL < <(grep -oP 'acl ip_\d+ myip \K[\d.]+' "$SQUID_CONF" | sort -t. -k4n)
-    [ ${#IP_POOL[@]} -eq 0 ] && { echo "Squid配置中未找到IP池"; exit 1; }
+    [ ${#IP_POOL[@]} -eq 0 ] && { echo "错误：Squid配置中未找到IP池"; exit 1; }
     
-    # 排除已用IP
+    # 获取已分配IP
     USED_IPS=()
     [ -d "$OPENVPN_DIR/ccd" ] && \
         mapfile -t USED_IPS < <(grep -hoP 'ifconfig-push \K[\d.]+' "$OPENVPN_DIR"/ccd/* 2>/dev/null)
     
-    # 动态计算可用IP
-    AVAILABLE_IPS=()
+    # 返回第一个未使用的IP
     for ip in "${IP_POOL[@]}"; do
-        [[ " ${USED_IPS[*]} " =~ " $ip " ]] || AVAILABLE_IPS+=("$ip")
+        [[ " ${USED_IPS[*]} " =~ " $ip " ]] || { echo "$ip"; return; }
     done
     
-    [ ${#AVAILABLE_IPS[@]} -eq 0 ] && { echo "IP池已耗尽"; exit 1; }
-    echo "${AVAILABLE_IPS[0]}"  # 返回第一个可用IP
+    echo "错误：所有IP地址已分配" >&2
+    exit 1
 }
 
 # 配置OpenVPN服务
 setup_openvpn() {
+    echo "正在配置OpenVPN服务..."
     cat > "$OPENVPN_DIR/server.conf" <<EOF
 port 1194
 proto udp
@@ -91,6 +86,7 @@ crl-verify $OPENVPN_DIR/crl.pem
 client-config-dir $OPENVPN_DIR/ccd
 EOF
 
+    # 生成TLS-auth密钥
     openvpn --genkey --secret "$OPENVPN_DIR/ta.key"
     mkdir -p "$OPENVPN_DIR/ccd"
 }
@@ -127,20 +123,17 @@ EOF
 # 全自动添加用户
 add_user() {
     local username="$1"
-    [ -z "$username" ] && { echo "缺少用户名"; exit 1; }
+    [ -z "$username" ] && { echo "用法: $0 adduser <用户名>"; exit 1; }
     
-    local client_ip=$(get_ip_pool)
+    local client_ip=$(get_available_ip)
     [ -z "$client_ip" ] && exit 1
 
-    # 自动化证书签发
+    echo "正在为用户 $username 分配IP: $client_ip"
+    
+    # 签发客户端证书
     cd "$EASY_RSA_DIR" || exit
-    expect <<EOF
-spawn ./easyrsa build-client-full "$username" nopass
-expect "Confirm request details:"
-send "yes\r"
-expect eof
-EOF
-
+    ./easyrsa build-client-full "$username" nopass
+    
     # 生成客户端配置
     awk -v cert="$(cat "pki/issued/$username.crt")" \
         -v key="$(cat "pki/private/$username.key")" \
@@ -150,17 +143,18 @@ EOF
     # 设置固定IP
     echo "ifconfig-push $client_ip 255.255.255.0" > "$OPENVPN_DIR/ccd/$username"
     
-    echo "用户 $username 添加成功"
-    echo "IP: $client_ip | 配置文件: $CLIENT_DIR/$username.ovpn"
+    echo "用户添加成功:"
+    echo "IP地址: $client_ip"
+    echo "配置文件: $CLIENT_DIR/$username.ovpn"
 }
 
 # 删除用户
 del_user() {
     local username="$1"
-    [ -z "$username" ] && { echo "缺少用户名"; exit 1; }
+    [ -z "$username" ] && { echo "用法: $0 deluser <用户名>"; exit 1; }
     
     cd "$EASY_RSA_DIR" || exit
-    ./easyrsa --batch revoke "$username"
+    ./easyrsa revoke "$username"
     ./easyrsa gen-crl
     cp pki/crl.pem "$OPENVPN_DIR/"
     
@@ -177,12 +171,11 @@ del_user() {
 # 主逻辑
 case "$1" in
     install)
-        install_deps
         init_pki
         setup_openvpn
         create_client_tpl
         systemctl enable --now openvpn@server
-        echo "安装完成"
+        echo "OpenVPN安装完成"
         ;;
     adduser)
         add_user "$2"
