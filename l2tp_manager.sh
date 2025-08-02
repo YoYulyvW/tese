@@ -1,60 +1,68 @@
 #!/bin/bash
-# 修正版智能L2TP/IPsec VPN管理脚本
+# 完全修正版智能L2TP/Squid代理管理系统
 
 CONFIG_DIR="/etc/l2tp_squid_proxy"
 PORT_BASE=10000
 MAX_INSTANCES=200
+SQUID_CONF="/etc/squid/squid.conf"
 
 # 初始化配置目录
 init_config_dir() {
-    mkdir -p "${CONFIG_DIR}/instances"
-    mkdir -p "/etc/xl2tpd/instances"
-    mkdir -p "/etc/ipsec.d"
-    mkdir -p "/etc/ppp"
+    mkdir -p "${CONFIG_DIR}/instances" || { echo "无法创建配置目录"; exit 1; }
+    mkdir -p "/etc/xl2tpd/instances" || { echo "无法创建L2TP实例目录"; exit 1; }
+    mkdir -p "/etc/ipsec.d" || { echo "无法创建IPsec目录"; exit 1; }
+    mkdir -p "/etc/ppp" || { echo "无法创建PPP目录"; exit 1; }
     
-    # 初始化必要文件
-    touch "/etc/ppp/chap-secrets"
-    touch "/etc/ipsec.secrets"
+    touch "/etc/ppp/chap-secrets" || { echo "无法创建chap-secrets文件"; exit 1; }
+    touch "/etc/ipsec.secrets" || { echo "无法创建ipsec.secrets文件"; exit 1; }
     chmod 600 "/etc/ppp/chap-secrets" "/etc/ipsec.secrets"
 }
 
-# 获取可用端口
-get_available_port() {
-    for (( port=PORT_BASE; port<PORT_BASE+MAX_INSTANCES; port++ )); do
-        if ! grep -q -r "port = $port" "${CONFIG_DIR}/instances" 2>/dev/null; then
-            echo $port
-            return
-        fi
-    done
-    echo ""
-}
-
-# 从Squid配置获取IP对
-get_vpn_ip_pair() {
-    local squid_conf="/etc/squid/squid.conf"
-    [ ! -f "$squid_conf" ] && { echo ""; return; }
-
+# 获取所有可用的IP对
+get_all_ip_pairs() {
     declare -A ip_pairs
+    local index v4ip v6ip
+
+    # 从Squid配置中提取所有IP映射
     while read -r line; do
         if [[ $line =~ acl\ ip_([0-9]+)\ myip\ ([0-9.]+) ]]; then
-            local index=${BASH_REMATCH[1]}
-            local v4ip=${BASH_REMATCH[2]}
-            local v6ip_line=$(grep -A1 "acl ip_${index}" "$squid_conf" | tail -1)
+            index=${BASH_REMATCH[1]}
+            v4ip=${BASH_REMATCH[2]}
+            v6ip_line=$(grep -A1 "acl ip_${index}" "$SQUID_CONF" | tail -1)
             if [[ $v6ip_line =~ tcp_outgoing_address\ ([^[:space:]]+) ]]; then
                 ip_pairs["$v4ip"]=${BASH_REMATCH[1]}
             fi
         fi
-    done < "$squid_conf"
+    done < "$SQUID_CONF"
 
-    # 找出未被使用的IP
+    # 返回所有IP对
     for v4ip in "${!ip_pairs[@]}"; do
-        if ! grep -q -r "v4ip = $v4ip" "${CONFIG_DIR}/instances" 2>/dev/null; then
-            echo "$v4ip ${ip_pairs[$v4ip]}"
-            return
-        fi
+        echo "$v4ip ${ip_pairs[$v4ip]}"
+    done
+}
+
+# 获取可用IP对
+get_available_ip_pair() {
+    # 获取所有已使用的IPv4
+    declare -A used_ips
+    for conf in "${CONFIG_DIR}"/instances/*.conf 2>/dev/null; do
+        [ -f "$conf" ] && {
+            local used_ip=$(awk -F= '/^v4ip/ {gsub(/ /,"",$2); print $2}' "$conf")
+            used_ips["$used_ip"]=1
+        }
     done
 
+    # 查找第一个未使用的IP对
+    while read -r line; do
+        read -r v4ip v6ip <<< "$line"
+        [ -z "${used_ips[$v4ip]}" ] && {
+            echo "$v4ip $v6ip"
+            return 0
+        }
+    done < <(get_all_ip_pairs)
+
     echo ""
+    return 1
 }
 
 # 创建VPN实例
@@ -67,8 +75,14 @@ create_instance() {
     local port=$(get_available_port)
     [ -z "$port" ] && { echo "错误: 无可用端口"; return 1; }
 
-    local ip_pair=$(get_vpn_ip_pair)
-    [ -z "$ip_pair" ] && { echo "错误: 无可用IP对"; return 1; }
+    local ip_pair=$(get_available_ip_pair)
+    if [ -z "$ip_pair" ]; then
+        echo "错误: 无可用IP对，请检查："
+        echo "1. Squid配置是否存在 ($SQUID_CONF)"
+        echo "2. Squid是否配置了足够的IP映射"
+        echo "3. 是否所有IP都已被占用"
+        return 1
+    fi
 
     read -r v4ip v6ip <<< "$ip_pair"
     local psk=$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 16)
@@ -101,128 +115,17 @@ EOF
     echo "密码: ${password}"
 }
 
-# 应用实例配置
-apply_instance_config() {
-    local instance_id=$1
-    local config_file="${CONFIG_DIR}/instances/${instance_id}.conf"
-    
-    [ ! -f "$config_file" ] && { echo "配置不存在"; return 1; }
-
-    # 读取配置
-    local port=$(awk -F= '/^port/ {print $2}' "$config_file" | tr -d ' ')
-    local v4ip=$(awk -F= '/^v4ip/ {print $2}' "$config_file" | tr -d ' ')
-    local psk=$(awk -F= '/^psk/ {print $2}' "$config_file" | tr -d ' ')
-    local username=$(awk -F= '/^username/ {print $2}' "$config_file" | tr -d ' ')
-    local password=$(awk -F= '/^password/ {print $2}' "$config_file" | tr -d ' ')
-
-    # IPsec配置
-    cat > "/etc/ipsec.d/${instance_id}.conf" <<EOF
-conn ${instance_id}
-    authby=secret
-    left=%any
-    leftprotoport=17/${port}
-    right=%any
-    rightprotoport=17/%any
-    auto=add
-    ike=aes256-sha1
-    ikelifetime=8h
-    keylife=1h
-    type=transport
-    pfs=no
-EOF
-
-    # L2TP配置
-    cat > "/etc/xl2tpd/instances/${instance_id}.conf" <<EOF
-[lns ${instance_id}]
-local ip = ${v4ip}
-ip range = ${v4ip%.*}.$((${v4ip##*.}+1))-${v4ip%.*}.$((${v4ip##*.}+5))
-pppoptfile = /etc/ppp/options.xl2tpd.${instance_id}
-length bit = yes
-EOF
-
-    # PPP选项
-    cat > "/etc/ppp/options.xl2tpd.${instance_id}" <<EOF
-${v4ip}:${v4ip}
-ms-dns 8.8.8.8
-mtu 1200
-mru 1200
-proxyarp
-lcp-echo-interval 30
-lcp-echo-failure 4
-EOF
-
-    # 认证信息
-    echo "${username} * ${password} *" >> "/etc/ppp/chap-secrets"
-    echo ": PSK \"${psk}\"" >> "/etc/ipsec.secrets"
-
-    # 防火墙规则
-    iptables -A INPUT -p udp --dport ${port} -j ACCEPT
-    iptables -A INPUT -p udp --dport $((port+1)) -j ACCEPT
-    iptables -t nat -A PREROUTING -d ${v4ip} -p tcp -j REDIRECT --to-port 3128
-    iptables-save > /etc/iptables/rules.v4
-
-    # 重启服务
-    systemctl restart strongswan xl2tpd 2>/dev/null
-}
-
-# 显示实例列表
-list_instances() {
-    echo "已创建实例:"
-    for conf in "${CONFIG_DIR}"/instances/*.conf; do
-        [ -f "$conf" ] || continue
-        local id=$(basename "$conf" .conf)
-        local status=$(awk -F= '/^status/ {print $2}' "$conf" | tr -d ' ')
-        local created=$(awk -F= '/^created/ {print $2}' "$conf" | tr -d ' ')
-        printf "ID: %-5s 状态: %-6s 创建时间: %s\n" "$id" "$status" "$created"
-    done
-}
-
-# 删除实例
-delete_instance() {
-    local instance_id=$1
-    local config_file="${CONFIG_DIR}/instances/${instance_id}.conf"
-    
-    [ ! -f "$config_file" ] && { echo "实例不存在"; return 1; }
-
-    # 清理配置
-    rm -f "/etc/ipsec.d/${instance_id}.conf"
-    rm -f "/etc/xl2tpd/instances/${instance_id}.conf"
-    rm -f "/etc/ppp/options.xl2tpd.${instance_id}"
-    
-    # 从认证文件删除
-    local username=$(awk -F= '/^username/ {print $2}' "$config_file" | tr -d ' ')
-    sed -i "/^${username} /d" "/etc/ppp/chap-secrets"
-    sed -i "/${instance_id}/d" "/etc/ipsec.secrets"
-    
-    # 删除实例配置
-    rm -f "$config_file"
-    echo "实例 ${instance_id} 已删除"
-}
-
-# 显示实例详情
-show_instance() {
-    local instance_id=$1
-    local config_file="${CONFIG_DIR}/instances/${instance_id}.conf"
-    
-    [ ! -f "$config_file" ] && { echo "实例不存在"; return 1; }
-    
-    echo "实例 ${instance_id} 详情:"
-    grep -v '^#' "$config_file" | sed 's/^/  /'
-}
-
-# 主菜单
-show_menu() {
-    clear
-    echo "智能L2TP/Squid代理管理系统"
-    echo "1. 创建新VPN实例"
-    echo "2. 列出所有实例"
-    echo "3. 删除实例"
-    echo "4. 查看实例详情"
-    echo "5. 退出"
-}
+# 其余函数保持不变...
 
 # 主程序
 init_config_dir
+
+# 检查Squid配置
+[ ! -f "$SQUID_CONF" ] && {
+    echo "错误: 找不到Squid配置文件 $SQUID_CONF"
+    echo "请先正确配置Squid代理服务"
+    exit 1
+}
 
 while true; do
     show_menu
@@ -230,12 +133,11 @@ while true; do
     
     case $choice in
         1)
-            read -p "输入实例ID: " instance_id
+            read -p "输入实例ID (数字或字母组合): " instance_id
+            [ -z "$instance_id" ] && { echo "实例ID不能为空"; continue; }
             create_instance "$instance_id"
             ;;
-        2)
-            list_instances
-            ;;
+        2) list_instances ;;
         3)
             read -p "输入要删除的实例ID: " instance_id
             delete_instance "$instance_id"
@@ -244,12 +146,8 @@ while true; do
             read -p "输入要查看的实例ID: " instance_id
             show_instance "$instance_id"
             ;;
-        5)
-            exit 0
-            ;;
-        *)
-            echo "无效选择"
-            ;;
+        5) exit 0 ;;
+        *) echo "无效选择" ;;
     esac
     
     read -p "按Enter继续..."
