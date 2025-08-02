@@ -33,16 +33,34 @@ install_deps() {
     ln -s /usr/share/easy-rsa/* /usr/local/bin/ 2>/dev/null
 }
 
-# 初始化PKI
 init_pki() {
     echo "▶ 生成证书..." | tee -a "$LOG_FILE"
-    rm -rf "$EASYRSA_DIR"
-    make-cadir "$EASYRSA_DIR"
-    cd "$EASYRSA_DIR" || exit 1
     
-    # 非交互式生成证书
+    # 确保目录存在
+    mkdir -p "$EASYRSA_DIR"
+    cd "$EASYRSA_DIR" || {
+        echo "✗ 无法进入目录 $EASYRSA_DIR" | tee -a "$LOG_FILE"
+        exit 1
+    }
+
+    # 初始化环境
     export EASYRSA_BATCH=1
-    ./easyrsa init-pki >> "$LOG_FILE" 2>&1
+    export EASYRSA_PKI="$EASYRSA_DIR/pki"
+    
+    # 从包中复制easy-rsa文件
+    if [ ! -f "$EASYRSA_DIR/vars" ]; then
+        cp -r /usr/share/easy-rsa/* "$EASYRSA_DIR/" || {
+            echo "✗ 无法复制easy-rsa文件" | tee -a "$LOG_FILE"
+            exit 1
+        }
+    fi
+
+    # 非交互式生成证书
+    ./easyrsa init-pki >> "$LOG_FILE" 2>&1 || {
+        echo "✗ PKI初始化失败" | tee -a "$LOG_FILE"
+        exit 1
+    }
+    
     ./easyrsa build-ca nopass >> "$LOG_FILE" 2>&1
     ./easyrsa build-server-full server nopass >> "$LOG_FILE" 2>&1
     ./easyrsa gen-dh >> "$LOG_FILE" 2>&1
