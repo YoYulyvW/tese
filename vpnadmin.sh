@@ -17,7 +17,7 @@ fi
 install_dependencies() {
     echo "▶ 安装必要依赖..."
     apt update
-    apt install -y openvpn easy-rsa squid
+    apt install -y openvpn easy-rsa
 }
 
 # 初始化PKI
