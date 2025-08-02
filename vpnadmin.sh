@@ -1,125 +1,75 @@
 #!/bin/bash
 
-# OpenVPN管理脚本（证书认证版）
-# 认证方式：tls-crypt + CA证书 + 客户端证书
-# 版本：5.0
+# OpenVPN管理脚本（增强版）
+# 修复问题：IP显示 | 用户列表 | 文件清理 | 代理池管理
+# 版本：5.1
 
 # 配置路径
+SQUID_CONF="/etc/squid/squid.conf"
 OPENVPN_DIR="/etc/openvpn"
 EASY_RSA_DIR="$OPENVPN_DIR/easy-rsa"
 CLIENT_DIR="$OPENVPN_DIR/client-configs"
+CCD_DIR="$OPENVPN_DIR/ccd"
 LOG_FILE="/var/log/vpnadmin.log"
 STATUS_FILE="$OPENVPN_DIR/openvpn-status.log"
+PROXY_POOL=("10.0.3.1" "10.0.3.2" "10.0.2.2") # 需要屏蔽的代理IP
 
-# 初始化日志
-init_log() {
-    mkdir -p "$(dirname "$LOG_FILE")"
-    echo "====== $(date) ======" >> "$LOG_FILE"
+# 初始化环境
+init_env() {
+    mkdir -p "$CLIENT_DIR" "$CCD_DIR"
+    touch "$LOG_FILE"
+    chmod 600 "$OPENVPN_DIR"/*.key 2>/dev/null
 }
 
-# 记录日志
+# 日志记录
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
 
-# 检查root权限
-check_root() {
-    [ "$(id -u)" != "0" ] && { log "错误：必须使用root权限运行"; exit 1; }
-}
-
-# 初始化PKI
-init_pki() {
-    log "正在初始化PKI..."
+# 获取可用IP
+get_available_ip() {
+    # 从Squid配置提取所有IP
+    mapfile -t ALL_IPS < <(grep -oP 'acl ip_\d+ myip \K[\d.]+' "$SQUID_CONF" | sort -t. -k4n)
     
-    rm -rf "$EASY_RSA_DIR"
-    make-cadir "$EASY_RSA_DIR"
+    # 排除已用IP和代理池IP
+    USED_IPS=($(grep -hoP 'ifconfig-push \K[\d.]+' "$CCD_DIR"/* 2>/dev/null))
+    EXCLUDE_IPS=("${PROXY_POOL[@]}" "${USED_IPS[@]}")
     
-    # 创建自动应答配置
-    cat > "$EASY_RSA_DIR/vars" <<'EOF'
-set_var EASYRSA_BATCH           "1"
-set_var EASYRSA_REQ_COUNTRY     "CN"
-set_var EASYRSA_REQ_PROVINCE    "Beijing"
-set_var EASYRSA_REQ_CITY        "Beijing"
-set_var EASYRSA_REQ_ORG         "MyVPN"
-set_var EASYRSA_REQ_EMAIL       "admin@myvpn.com"
-set_var EASYRSA_REQ_OU          "VPN"
-set_var EASYRSA_REQ_CN          "VPN-CA"
-set_var EASYRSA_KEY_SIZE        2048
-set_var EASYRSA_ALGO            rsa
-set_var EASYRSA_CURVE           secp384r1
-EOF
-
-    cd "$EASY_RSA_DIR" || exit
+    for ip in "${ALL_IPS[@]}"; do
+        if ! printf '%s\n' "${EXCLUDE_IPS[@]}" | grep -q "^${ip}$"; then
+            echo "$ip"
+            return 0
+        fi
+    done
     
-    # 非交互式初始化
-    ./easyrsa init-pki >> "$LOG_FILE" 2>&1
-    ./easyrsa build-ca nopass >> "$LOG_FILE" 2>&1
-    ./easyrsa gen-dh >> "$LOG_FILE" 2>&1
-    ./easyrsa build-server-full server nopass >> "$LOG_FILE" 2>&1
-    ./easyrsa gen-crl >> "$LOG_FILE" 2>&1
-
-    # 生成tls-crypt密钥
-    openvpn --genkey --secret "$OPENVPN_DIR/tls-crypt.key" >> "$LOG_FILE" 2>&1
-    
-    # 部署证书
-    cp pki/{ca.crt,issued/server.crt,private/{ca,server}.key,dh.pem,crl.pem} "$OPENVPN_DIR/"
-    chmod 600 "$OPENVPN_DIR"/*.key
-    
-    log "PKI初始化完成"
-}
-
-# 配置OpenVPN服务
-setup_server() {
-    log "正在配置OpenVPN服务..."
-    
-    cat > "$OPENVPN_DIR/server.conf" <<EOF
-port 1194
-proto udp
-dev tun
-ca $OPENVPN_DIR/ca.crt
-cert $OPENVPN_DIR/server.crt
-key $OPENVPN_DIR/server.key
-dh $OPENVPN_DIR/dh.pem
-server 10.8.0.0 255.255.255.0
-topology subnet
-push "redirect-gateway def1 bypass-dhcp"
-push "dhcp-option DNS 8.8.8.8"
-keepalive 10 120
-tls-crypt $OPENVPN_DIR/tls-crypt.key
-cipher AES-256-GCM
-user nobody
-group nogroup
-persist-key
-persist-tun
-status $STATUS_FILE 30
-status-version 2
-verb 3
-crl-verify $OPENVPN_DIR/crl.pem
-EOF
-
-    systemctl enable --now openvpn@server >> "$LOG_FILE" 2>&1
-    log "OpenVPN服务配置完成"
+    log "错误：没有可用的IP地址"
+    exit 1
 }
 
 # 添加用户
 add_user() {
+    [ -z "$1" ] && { log "用法: $0 add <用户名>"; exit 1; }
     local username="$1"
-    [ -z "$username" ] && { log "用法: $0 add <用户名>"; exit 1; }
+    local client_ip=$(get_available_ip)
     
+    # 清理旧文件
+    rm -f "$CLIENT_DIR/$username.ovpn" "$CCD_DIR/$username" 2>/dev/null
+    
+    # 签发证书
     cd "$EASY_RSA_DIR" || exit
-    
-    # 签发客户端证书
     ./easyrsa build-client-full "$username" nopass >> "$LOG_FILE" 2>&1 || {
-        log "错误：证书签发失败"; exit 1
+        log "证书签发失败"; exit 1
     }
     
+    # 分配IP
+    echo "ifconfig-push $client_ip 255.255.255.0" > "$CCD_DIR/$username"
+    
     # 生成客户端配置
-    mkdir -p "$CLIENT_DIR"
     cat > "$CLIENT_DIR/$username.ovpn" <<EOF
 client
 dev tun
 proto udp
-remote $(curl -s ifconfig.me) 1194
+remote $(hostname -I | awk '{print $1}') 1194
 resolv-retry infinite
 nobind
 persist-key
@@ -141,16 +91,20 @@ $(cat "$OPENVPN_DIR/tls-crypt.key")
 </tls-crypt>
 EOF
     
-    log "用户 $username 添加成功"
-    echo "=== 客户端配置 ==="
-    echo "文件路径: $CLIENT_DIR/$username.ovpn"
-    echo "下载命令: scp root@$(hostname -I | awk '{print $1}'):$CLIENT_DIR/$username.ovpn ."
+    # 显示信息
+    log "用户添加成功: $username"
+    echo "=== 连接信息 ==="
+    echo "服务器IP: $(hostname -I | awk '{print $1}')"
+    echo "端口: 1194"
+    echo "分配IP: $client_ip"
+    echo "配置文件: $CLIENT_DIR/$username.ovpn"
+    echo "下载: scp root@$(hostname -I | awk '{print $1}'):$CLIENT_DIR/$username.ovpn ."
 }
 
 # 删除用户
 del_user() {
+    [ -z "$1" ] && { log "用法: $0 del <用户名>"; exit 1; }
     local username="$1"
-    [ -z "$username" ] && { log "用法: $0 del <用户名>"; exit 1; }
     
     cd "$EASY_RSA_DIR" || exit
     ./easyrsa revoke "$username" >> "$LOG_FILE" 2>&1
@@ -161,64 +115,43 @@ del_user() {
         "pki/issued/$username.crt" \
         "pki/private/$username.key" \
         "pki/reqs/$username.req" \
-        "$CLIENT_DIR/$username.ovpn"
+        "$CLIENT_DIR/$username.ovpn" \
+        "$CCD_DIR/$username"
     
-    log "用户 $username 已吊销"
+    log "用户 $username 已删除"
 }
 
 # 列出用户
 list_users() {
     echo "=== VPN用户列表 ==="
-    echo "用户名 | 证书状态 | 吊销状态"
+    echo "用户名 | 分配IP | 证书状态"
     echo "--------------------------"
     
-    cd "$EASY_RSA_DIR" || exit
-    
     # 获取吊销列表
-    declare -A revoked_certs
+    declare -A revoked
+    cd "$EASY_RSA_DIR" || exit
     while read -r line; do
         if [[ $line =~ ^R.*CN=([^/]+) ]]; then
-            revoked_certs["${BASH_REMATCH[1]}"]=1
+            revoked["${BASH_REMATCH[1]}"]=1
         fi
     done < <(./easyrsa list-crl 2>/dev/null)
     
-    # 列出所有证书
-    while read -r line; do
-        if [[ $line =~ ^V.*CN=([^/]+) ]]; then
-            local user="${BASH_REMATCH[1]}"
-            local status="有效"
-            [ -n "${revoked_certs[$user]}" ] && status="已吊销"
-            printf "%-10s | %-10s | %s\n" "$user" "已签发" "$status"
-        fi
-    done < <(./easyrsa list-crt 2>/dev/null)
-}
-
-# 查看状态
-show_status() {
-    echo "=== OpenVPN服务状态 ==="
-    systemctl status openvpn@server --no-pager
-    
-    echo -e "\n=== 当前连接 ==="
-    if [ -f "$STATUS_FILE" ]; then
-        column -t -s ',' "$STATUS_FILE" | awk '
-            /^CLIENT_LIST/ {print "用户: "$2"\tIP: "$3"\t连接时间: "$4}
-            /^ROUTING_TABLE/ {print "路由: "$2" -> "$3"\t虚拟IP: "$4}
-        '
-    else
-        echo "没有活跃连接"
-    fi
+    # 列出所有配置
+    for ccd_file in "$CCD_DIR"/*; do
+        [ -f "$ccd_file" ] || continue
+        local username=$(basename "$ccd_file")
+        local ip=$(grep -oP 'ifconfig-push \K[\d.]+' "$ccd_file")
+        local status="有效"
+        [ -n "${revoked[$username]}" ] && status="已吊销"
+        
+        printf "%-10s | %-15s | %s\n" "$username" "$ip" "$status"
+    done
 }
 
 # 主菜单
 main() {
-    init_log
-    check_root
-    
+    init_env
     case "$1" in
-        install)
-            init_pki
-            setup_server
-            ;;
         add)
             add_user "$2"
             ;;
@@ -228,17 +161,12 @@ main() {
         list)
             list_users
             ;;
-        status)
-            show_status
-            ;;
         *)
-            echo "OpenVPN证书管理脚本"
-            echo "用法: $0 {install|add|del|list|status}"
-            echo "  install       - 初始化PKI和服务器配置"
-            echo "  add <用户名> - 添加VPN用户"
-            echo "  del <用户名> - 删除/吊销用户"
-            echo "  list          - 列出所有用户证书"
-            echo "  status        - 查看服务状态和连接"
+            echo "OpenVPN管理脚本"
+            echo "用法: $0 {add|del|list} [用户名]"
+            echo "  add <用户名>  - 添加用户并分配IP"
+            echo "  del <用户名>  - 删除用户并释放IP"
+            echo "  list          - 列出所有用户"
             exit 1
             ;;
     esac
