@@ -103,7 +103,8 @@ get_available_port() {
 # 从Squid配置获取所有IP对
 get_all_ip_pairs() {
     declare -A ip_pairs
-    local index v4ip v6ip
+    declare -A ipv6_map
+    declare -A ipv4_map
 
     if [ ! -f "$SQUID_CONF" ]; then
         log "ERROR" "Squid配置文件 $SQUID_CONF 不存在"
@@ -111,16 +112,28 @@ get_all_ip_pairs() {
     fi
 
     log "INFO" "正在从Squid配置中提取IP映射..."
-    
+
+    # 第一遍：收集所有IPv6映射
+    while IFS= read -r line; do
+        if [[ "$line" =~ tcp_outgoing_address[[:space:]]+([0-9a-fA-F:]+)[[:space:]]+ip_([0-9]+) ]]; then
+            local ipv6="${BASH_REMATCH[1]}"
+            local index="${BASH_REMATCH[2]}"
+            ipv6_map["$index"]="$ipv6"
+            log "DEBUG" "发现IPv6映射: ip_${index} -> $ipv6"
+        fi
+    done < "$SQUID_CONF"
+
+    # 第二遍：收集所有IPv4映射并配对
     while IFS= read -r line; do
         if [[ "$line" =~ acl[[:space:]]+ip_([0-9]+)[[:space:]]+myip[[:space:]]+([0-9.]+) ]]; then
-            index="${BASH_REMATCH[1]}"
-            v4ip="${BASH_REMATCH[2]}"
-            v6ip_line=$(grep -A1 "acl ip_${index}" "$SQUID_CONF" | tail -1)
+            local index="${BASH_REMATCH[1]}"
+            local v4ip="${BASH_REMATCH[2]}"
             
-            if [[ "$v6ip_line" =~ tcp_outgoing_address[[:space:]]+([^[:space:]]+) ]]; then
-                ip_pairs["$v4ip"]="${BASH_REMATCH[1]}"
-                log "INFO" "发现IP映射: $v4ip -> ${BASH_REMATCH[1]}"
+            if [ -n "${ipv6_map[$index]}" ]; then
+                ip_pairs["$v4ip"]="${ipv6_map[$index]}"
+                log "INFO" "发现完整IP对: $v4ip -> ${ipv6_map[$index]}"
+            else
+                log "WARNING" "ip_${index} 缺少对应的IPv6映射"
             fi
         fi
     done < "$SQUID_CONF"
@@ -130,6 +143,7 @@ get_all_ip_pairs() {
         return 1
     fi
 
+    # 输出结果
     for v4ip in "${!ip_pairs[@]}"; do
         echo "$v4ip ${ip_pairs[$v4ip]}"
     done
