@@ -1,81 +1,135 @@
 #!/bin/bash
-# 完全测试通过的L2TP/Squid代理管理系统
+# 智能L2TP/Squid代理管理系统 - 完全修正版
+# 版本: 2.0
+# 最后更新: 2023-10-15
 
+# 配置常量
 CONFIG_DIR="/etc/l2tp_squid_proxy"
 PORT_BASE=10000
 MAX_INSTANCES=200
 SQUID_CONF="/etc/squid/squid.conf"
+LOG_FILE="/var/log/l2tp_manager.log"
 
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# 初始化日志
+init_log() {
+    touch "$LOG_FILE" || {
+        echo -e "${RED}无法创建日志文件 $LOG_FILE${NC}"
+        exit 1
+    }
+    chmod 640 "$LOG_FILE"
+    echo -e "\n\n=== 会话开始于 $(date) ===" >> "$LOG_FILE"
+}
+
+# 记录日志
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    
+    case $level in
+        "INFO") color="$BLUE" ;;
+        "SUCCESS") color="$GREEN" ;;
+        "WARNING") color="$YELLOW" ;;
+        "ERROR") color="$RED" ;;
+        *) color="$NC" ;;
+    esac
+    
+    echo -e "[$timestamp] [$level] $message" >> "$LOG_FILE"
+    echo -e "${color}[$timestamp] $message${NC}" >&2
+}
 
 # 初始化配置目录
 init_config_dir() {
-    echo -e "${YELLOW}初始化配置目录...${NC}"
-    mkdir -p "${CONFIG_DIR}/instances" || error_exit "无法创建配置目录"
-    mkdir -p "/etc/xl2tpd/instances" || error_exit "无法创建L2TP实例目录"
-    mkdir -p "/etc/ipsec.d" || error_exit "无法创建IPsec目录"
-    mkdir -p "/etc/ppp" || error_exit "无法创建PPP目录"
+    log "INFO" "初始化配置目录..."
     
-    touch "/etc/ppp/chap-secrets" || error_exit "无法创建chap-secrets文件"
-    touch "/etc/ipsec.secrets" || error_exit "无法创建ipsec.secrets文件"
+    local dirs=(
+        "${CONFIG_DIR}/instances"
+        "/etc/xl2tpd/instances"
+        "/etc/ipsec.d"
+        "/etc/ppp"
+    )
+    
+    for dir in "${dirs[@]}"; do
+        mkdir -p "$dir" || {
+            log "ERROR" "无法创建目录 $dir"
+            exit 1
+        }
+    done
+    
+    touch "/etc/ppp/chap-secrets" || {
+        log "ERROR" "无法创建chap-secrets文件"
+        exit 1
+    }
+    
+    touch "/etc/ipsec.secrets" || {
+        log "ERROR" "无法创建ipsec.secrets文件"
+        exit 1
+    }
+    
     chmod 600 "/etc/ppp/chap-secrets" "/etc/ipsec.secrets"
-}
-
-# 错误处理
-error_exit() {
-    echo -e "${RED}错误: $1${NC}" >&2
-    exit 1
+    log "SUCCESS" "配置目录初始化完成"
 }
 
 # 获取可用端口
 get_available_port() {
     local used_ports=()
-    local conf_files=("${CONFIG_DIR}"/instances/*.conf)
+    shopt -s nullglob
     
-    if [ -e "${conf_files[0]}" ]; then
-        while IFS= read -r line; do
-            used_ports+=("$line")
-        done < <(grep -h "port =" "${CONFIG_DIR}"/instances/*.conf | awk '{print $3}')
-    fi
+    for conf in "${CONFIG_DIR}"/instances/*.conf; do
+        local port=$(awk -F= '/^port/ {gsub(/[[:space:]]/, "", $2); print $2}' "$conf")
+        used_ports+=("$port")
+    done
+    shopt -u nullglob
 
     for (( port=PORT_BASE; port<PORT_BASE+MAX_INSTANCES; port++ )); do
-        if ! printf '%s\n' "${used_ports[@]}" | grep -q "^${port}$"; then
+        if ! [[ " ${used_ports[*]} " =~ " $port " ]]; then
             echo "$port"
-            return
+            return 0
         fi
     done
-
+    
+    log "ERROR" "无可用端口 (范围: $PORT_BASE-$((PORT_BASE+MAX_INSTANCES-1)))"
     echo ""
+    return 1
 }
 
-# 获取所有可用的IP对
+# 从Squid配置获取所有IP对
 get_all_ip_pairs() {
     declare -A ip_pairs
     local index v4ip v6ip
 
     if [ ! -f "$SQUID_CONF" ]; then
-        echo -e "${RED}错误: Squid配置文件 $SQUID_CONF 不存在${NC}"
+        log "ERROR" "Squid配置文件 $SQUID_CONF 不存在"
         return 1
     fi
 
-    # 从Squid配置中提取所有IP映射
+    log "INFO" "正在从Squid配置中提取IP映射..."
+    
     while IFS= read -r line; do
         if [[ "$line" =~ acl[[:space:]]+ip_([0-9]+)[[:space:]]+myip[[:space:]]+([0-9.]+) ]]; then
             index="${BASH_REMATCH[1]}"
             v4ip="${BASH_REMATCH[2]}"
             v6ip_line=$(grep -A1 "acl ip_${index}" "$SQUID_CONF" | tail -1)
+            
             if [[ "$v6ip_line" =~ tcp_outgoing_address[[:space:]]+([^[:space:]]+) ]]; then
                 ip_pairs["$v4ip"]="${BASH_REMATCH[1]}"
-                echo -e "${GREEN}发现可用IP对: ${v4ip} -> ${BASH_REMATCH[1]}${NC}" >&2
+                log "INFO" "发现IP映射: $v4ip -> ${BASH_REMATCH[1]}"
             fi
         fi
     done < "$SQUID_CONF"
 
-    # 返回所有IP对
+    if [ ${#ip_pairs[@]} -eq 0 ]; then
+        log "ERROR" "Squid配置中没有找到有效的IP映射规则"
+        return 1
+    fi
+
     for v4ip in "${!ip_pairs[@]}"; do
         echo "$v4ip ${ip_pairs[$v4ip]}"
     done
@@ -84,15 +138,14 @@ get_all_ip_pairs() {
 # 获取可用IP对
 get_available_ip_pair() {
     declare -A used_ips
-    local conf_files=("${CONFIG_DIR}"/instances/*.conf)
+    shopt -s nullglob
     
-    if [ -e "${conf_files[0]}" ]; then
-        while IFS= read -r line; do
-            used_ips["$line"]=1
-        done < <(grep -h "v4ip =" "${CONFIG_DIR}"/instances/*.conf | awk '{print $3}')
-    fi
+    for conf in "${CONFIG_DIR}"/instances/*.conf; do
+        local used_ip=$(awk -F= '/^v4ip/ {gsub(/[[:space:]]/, "", $2); print $2}' "$conf")
+        used_ips["$used_ip"]=1
+    done
+    shopt -u nullglob
 
-    # 查找第一个未使用的IP对
     while IFS= read -r line; do
         read -r v4ip v6ip <<< "$line"
         if [ -z "${used_ips[$v4ip]}" ]; then
@@ -100,65 +153,10 @@ get_available_ip_pair() {
             return 0
         fi
     done < <(get_all_ip_pairs)
-
-    echo -e "${RED}无可用IP对，原因可能是:${NC}" >&2
-    echo -e "1. 所有IP都已被占用" >&2
-    echo -e "2. Squid配置中没有有效的IP映射规则" >&2
-    echo -e "3. Squid配置文件路径不正确" >&2
+    
+    log "ERROR" "无可用IP对"
     echo ""
     return 1
-}
-
-# 创建VPN实例
-create_instance() {
-    local instance_id=$1
-    local config_file="${CONFIG_DIR}/instances/${instance_id}.conf"
-    
-    if [ -f "$config_file" ]; then
-        echo -e "${RED}实例 ${instance_id} 已存在${NC}"
-        return 1
-    fi
-
-    local port=$(get_available_port)
-    if [ -z "$port" ]; then
-        echo -e "${RED}错误: 无可用端口 (当前范围: ${PORT_BASE}-$((PORT_BASE+MAX_INSTANCES-1)))${NC}"
-        return 1
-    fi
-
-    echo -e "${YELLOW}正在查找可用IP对...${NC}"
-    local ip_pair=$(get_available_ip_pair)
-    if [ -z "$ip_pair" ]; then
-        return 1
-    fi
-
-    read -r v4ip v6ip <<< "$ip_pair"
-    local psk=$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 16)
-    local password=$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 12)
-    local username="vpnuser_${instance_id}"
-
-    echo -e "${YELLOW}正在创建实例 ${instance_id}...${NC}"
-    cat > "$config_file" <<EOF
-[config]
-port = ${port}
-v4ip = ${v4ip}
-v6ip = ${v6ip}
-psk = ${psk}
-username = ${username}
-password = ${password}
-status = active
-created = $(date +%Y-%m-%d)
-EOF
-
-    apply_instance_config "$instance_id"
-    
-    echo -e "${GREEN}实例创建成功:${NC}"
-    echo -e "ID: ${GREEN}${instance_id}${NC}"
-    echo -e "L2TP端口: ${GREEN}${port}${NC}"
-    echo -e "客户端IPv4: ${GREEN}${v4ip}${NC}"
-    echo -e "绑定IPv6: ${GREEN}${v6ip}${NC}"
-    echo -e "PSK: ${GREEN}${psk}${NC}"
-    echo -e "用户名: ${GREEN}${username}${NC}"
-    echo -e "密码: ${GREEN}${password}${NC}"
 }
 
 # 应用实例配置
@@ -166,9 +164,12 @@ apply_instance_config() {
     local instance_id=$1
     local config_file="${CONFIG_DIR}/instances/${instance_id}.conf"
     
-    [ ! -f "$config_file" ] && { echo -e "${RED}配置不存在${NC}"; return 1; }
+    [ ! -f "$config_file" ] && {
+        log "ERROR" "实例配置文件不存在: $config_file"
+        return 1
+    }
 
-    echo -e "${YELLOW}正在应用配置...${NC}"
+    log "INFO" "正在应用实例 $instance_id 的配置..."
     
     local port=$(awk -F= '/^port/ {gsub(/[[:space:]]/, "", $2); print $2}' "$config_file")
     local v4ip=$(awk -F= '/^v4ip/ {gsub(/[[:space:]]/, "", $2); print $2}' "$config_file")
@@ -224,31 +225,56 @@ EOF
 
     # 重启服务
     systemctl restart strongswan xl2tpd 2>/dev/null
-    echo -e "${GREEN}配置应用成功${NC}"
+    
+    log "SUCCESS" "实例 $instance_id 配置应用成功"
 }
 
-# 显示实例列表
-list_instances() {
-    local conf_files=("${CONFIG_DIR}"/instances/*.conf)
+# 创建VPN实例
+create_instance() {
+    local instance_id=$1
+    local config_file="${CONFIG_DIR}/instances/${instance_id}.conf"
     
-    if [ ! -e "${conf_files[0]}" ]; then
-        echo -e "${YELLOW}没有找到任何实例${NC}"
-        return
-    fi
+    [ -f "$config_file" ] && {
+        log "ERROR" "实例 $instance_id 已存在"
+        return 1
+    }
 
-    echo -e "${GREEN}已创建实例列表:${NC}"
-    printf "%-10s %-15s %-10s %-20s %-15s\n" "ID" "IPv4" "端口" "创建时间" "状态"
-    printf "===================================================================\n"
+    local port=$(get_available_port)
+    [ -z "$port" ] && return 1
+
+    local ip_pair=$(get_available_ip_pair)
+    [ -z "$ip_pair" ] && return 1
+
+    read -r v4ip v6ip <<< "$ip_pair"
+    local psk=$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 16)
+    local password=$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 12)
+    local username="vpnuser_${instance_id}"
+
+    log "INFO" "正在创建实例 $instance_id..."
     
-    for conf in "${CONFIG_DIR}"/instances/*.conf; do
-        local id=$(basename "$conf" .conf)
-        local v4ip=$(awk -F= '/^v4ip/ {gsub(/[[:space:]]/, "", $2); print $2}' "$conf")
-        local port=$(awk -F= '/^port/ {gsub(/[[:space:]]/, "", $2); print $2}' "$conf")
-        local created=$(awk -F= '/^created/ {gsub(/[[:space:]]/, "", $2); print $2}' "$conf")
-        local status=$(awk -F= '/^status/ {gsub(/[[:space:]]/, "", $2); print $2}' "$conf")
-        
-        printf "%-10s %-15s %-10s %-20s %-15s\n" "$id" "$v4ip" "$port" "$created" "$status"
-    done
+    cat > "$config_file" <<EOF
+[config]
+port = ${port}
+v4ip = ${v4ip}
+v6ip = ${v6ip}
+psk = ${psk}
+username = ${username}
+password = ${password}
+status = active
+created = $(date +%Y-%m-%d)
+EOF
+
+    apply_instance_config "$instance_id"
+    
+    log "SUCCESS" "实例创建成功: $instance_id"
+    echo -e "${GREEN}实例创建成功:${NC}"
+    echo -e "ID: ${GREEN}${instance_id}${NC}"
+    echo -e "L2TP端口: ${GREEN}${port}${NC}"
+    echo -e "客户端IPv4: ${GREEN}${v4ip}${NC}"
+    echo -e "绑定IPv6: ${GREEN}${v6ip}${NC}"
+    echo -e "PSK: ${GREEN}${psk}${NC}"
+    echo -e "用户名: ${GREEN}${username}${NC}"
+    echo -e "密码: ${GREEN}${password}${NC}"
 }
 
 # 删除实例
@@ -256,12 +282,12 @@ delete_instance() {
     local instance_id=$1
     local config_file="${CONFIG_DIR}/instances/${instance_id}.conf"
     
-    if [ ! -f "$config_file" ]; then
-        echo -e "${RED}实例 ${instance_id} 不存在${NC}"
+    [ ! -f "$config_file" ] && {
+        log "ERROR" "实例 $instance_id 不存在"
         return 1
-    fi
+    }
 
-    echo -e "${YELLOW}正在删除实例 ${instance_id}...${NC}"
+    log "INFO" "正在删除实例 $instance_id..."
     
     local port=$(awk -F= '/^port/ {gsub(/[[:space:]]/, "", $2); print $2}' "$config_file")
     local username=$(awk -F= '/^username/ {gsub(/[[:space:]]/, "", $2); print $2}' "$config_file")
@@ -281,7 +307,36 @@ delete_instance() {
     iptables -D INPUT -p udp --dport $((port+1)) -j ACCEPT 2>/dev/null
     iptables-save > /etc/iptables/rules.v4
     
-    echo -e "${GREEN}实例 ${instance_id} 已删除${NC}"
+    log "SUCCESS" "实例 $instance_id 已删除"
+    echo -e "${GREEN}实例 $instance_id 已成功删除${NC}"
+}
+
+# 列出所有实例
+list_instances() {
+    shopt -s nullglob
+    local instances=("${CONFIG_DIR}"/instances/*.conf)
+    shopt -u nullglob
+
+    if [ ${#instances[@]} -eq 0 ]; then
+        log "INFO" "没有找到任何实例"
+        echo -e "${YELLOW}没有找到任何实例${NC}"
+        return
+    fi
+
+    log "INFO" "列出所有实例 (共 ${#instances[@]} 个)"
+    echo -e "${GREEN}已创建实例列表 (共 ${#instances[@]} 个):${NC}"
+    printf "%-10s %-15s %-10s %-20s %-15s\n" "ID" "IPv4" "端口" "创建时间" "状态"
+    echo "==================================================================="
+    
+    for conf in "${instances[@]}"; do
+        local id=$(basename "$conf" .conf)
+        local v4ip=$(awk -F= '/^v4ip/ {gsub(/[[:space:]]/, "", $2); print $2}' "$conf")
+        local port=$(awk -F= '/^port/ {gsub(/[[:space:]]/, "", $2); print $2}' "$conf")
+        local created=$(awk -F= '/^created/ {gsub(/[[:space:]]/, "", $2); print $2}' "$conf")
+        local status=$(awk -F= '/^status/ {gsub(/[[:space:]]/, "", $2); print $2}' "$conf")
+        
+        printf "%-10s %-15s %-10s %-20s %-15s\n" "$id" "$v4ip" "$port" "$created" "$status"
+    done
 }
 
 # 显示实例详情
@@ -289,11 +344,13 @@ show_instance() {
     local instance_id=$1
     local config_file="${CONFIG_DIR}/instances/${instance_id}.conf"
     
-    if [ ! -f "$config_file" ]; then
-        echo -e "${RED}实例 ${instance_id} 不存在${NC}"
+    [ ! -f "$config_file" ] && {
+        log "ERROR" "实例 $instance_id 不存在"
+        echo -e "${RED}实例 $instance_id 不存在${NC}"
         return 1
-    fi
+    }
     
+    log "INFO" "显示实例详情: $instance_id"
     echo -e "${GREEN}实例 ${instance_id} 详情:${NC}"
     echo "========================================"
     awk -F= '/^\[config\]/ {next} {gsub(/[[:space:]]/, "", $1); 
@@ -301,69 +358,98 @@ show_instance() {
     echo "========================================"
 }
 
-# 主菜单
+# 显示主菜单
 show_menu() {
     clear
     echo -e "${GREEN}智能L2TP/Squid代理管理系统${NC}"
+    echo -e "版本: ${BLUE}2.0${NC}"
+    echo -e "服务器IP: ${BLUE}$(hostname -I | awk '{print $1}')${NC}"
+    echo "----------------------------------------"
     echo "1. 创建新VPN实例"
     echo "2. 列出所有实例"
     echo "3. 删除实例"
     echo "4. 查看实例详情"
-    echo "5. 退出"
+    echo "5. 查看系统日志"
+    echo "6. 退出"
+    echo "----------------------------------------"
 }
 
 # 主程序
-echo -e "${GREEN}正在初始化系统...${NC}"
-init_config_dir
+main() {
+    # 检查root权限
+    [ "$(id -u)" != "0" ] && {
+        echo -e "${RED}错误: 需要root权限运行此脚本${NC}"
+        exit 1
+    }
 
-# 检查Squid配置
-if [ ! -f "$SQUID_CONF" ]; then
-    echo -e "${RED}错误: 找不到Squid配置文件 $SQUID_CONF${NC}"
-    echo -e "请先正确配置Squid代理服务"
-    exit 1
-fi
+    # 初始化
+    init_log
+    init_config_dir
 
-if ! grep -q "acl ip_.* myip" "$SQUID_CONF"; then
-    echo -e "${RED}错误: Squid配置缺少IP映射规则${NC}"
-    echo -e "请先在Squid中配置类似以下的规则："
-    echo -e "acl ip_1 myip 10.0.3.1"
-    echo -e "tcp_outgoing_address 2001:db8::1 ip_1"
-    exit 1
-fi
+    # 检查Squid配置
+    if [ ! -f "$SQUID_CONF" ]; then
+        log "ERROR" "找不到Squid配置文件 $SQUID_CONF"
+        echo -e "${RED}错误: 找不到Squid配置文件${NC}"
+        echo -e "请先安装并配置Squid代理服务"
+        exit 1
+    fi
 
-while true; do
-    show_menu
-    read -p "请选择操作[1-5]: " choice
-    
-    case $choice in
-        1)
-            read -p "输入实例ID (数字或字母组合): " instance_id
-            if [ -z "$instance_id" ]; then
-                echo -e "${RED}实例ID不能为空${NC}"
-                read -p "按Enter继续..."
-                continue
-            fi
-            create_instance "$instance_id"
-            ;;
-        2) list_instances ;;
-        3)
-            list_instances
-            read -p "输入要删除的实例ID: " instance_id
-            delete_instance "$instance_id"
-            ;;
-        4)
-            list_instances
-            read -p "输入要查看的实例ID: " instance_id
-            show_instance "$instance_id"
-            ;;
-        5) 
-            echo -e "${GREEN}退出系统${NC}"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}无效选择，请重新输入${NC}"
-            ;;
-    esac
-    
-    read -p "按Enter继续..."
-done
+    if ! grep -q "acl ip_.* myip" "$SQUID_CONF"; then
+        log "ERROR" "Squid配置缺少IP映射规则"
+        echo -e "${RED}错误: Squid配置缺少IP映射规则${NC}"
+        echo -e "请先在Squid中配置类似以下的规则："
+        echo -e "acl ip_1 myip 10.0.3.1"
+        echo -e "tcp_outgoing_address 2001:db8::1 ip_1"
+        exit 1
+    fi
+
+    # 主循环
+    while true; do
+        show_menu
+        read -p "请选择操作[1-6]: " choice
+        
+        case $choice in
+            1)
+                read -p "输入实例ID (数字或字母组合): " instance_id
+                if [[ ! "$instance_id" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                    echo -e "${RED}无效的实例ID，只能包含字母、数字、下划线和连字符${NC}"
+                    read -p "按Enter继续..."
+                    continue
+                fi
+                create_instance "$instance_id"
+                ;;
+            2) list_instances ;;
+            3)
+                list_instances
+                if [ $? -eq 0 ]; then
+                    read -p "输入要删除的实例ID: " instance_id
+                    delete_instance "$instance_id"
+                fi
+                ;;
+            4)
+                list_instances
+                if [ $? -eq 0 ]; then
+                    read -p "输入要查看的实例ID: " instance_id
+                    show_instance "$instance_id"
+                fi
+                ;;
+            5)
+                echo -e "${GREEN}显示最后20条系统日志:${NC}"
+                tail -n 20 "$LOG_FILE"
+                ;;
+            6) 
+                log "INFO" "用户退出系统"
+                echo -e "${GREEN}退出系统${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}无效选择，请重新输入${NC}"
+                ;;
+        esac
+        
+        read -p "按Enter继续..."
+    done
+}
+
+# 启动主程序
+main "$@"
