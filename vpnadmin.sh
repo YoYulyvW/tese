@@ -20,15 +20,23 @@ init_pki() {
     make-cadir "$EASY_RSA_DIR"
     cd "$EASY_RSA_DIR" || exit
 
-    # 创建vars文件避免交互
-    cat > vars <<EOF
-set_var EASYRSA_BATCH   "yes"
-set_var EASYRSA_REQ_CN  "VPN CA"
+    # 创建自动应答的vars文件
+    cat > vars <<'EOF'
+set_var EASYRSA_BATCH           "yes"
+set_var EASYRSA_REQ_COUNTRY     "CN"
+set_var EASYRSA_REQ_PROVINCE    "Beijing"
+set_var EASYRSA_REQ_CITY        "Beijing"
+set_var EASYRSA_REQ_ORG         "My Company"
+set_var EASYRSA_REQ_EMAIL       "admin@example.com"
+set_var EASYRSA_REQ_OU          "IT"
+set_var EASYRSA_REQ_CN          "VPN CA"
 EOF
 
-    # 自动化构建CA和证书
+    # 初始化并构建CA
     ./easyrsa init-pki
-    ./easyrsa build-ca nopass
+    ./easyrsa build-ca nopass <<< "yes"  # 自动确认CA创建
+    
+    # 生成其他必要文件
     ./easyrsa gen-dh
     ./easyrsa build-server-full server nopass
     ./easyrsa gen-crl
@@ -37,6 +45,7 @@ EOF
     cp pki/{ca.crt,issued/server.crt,private/{ca,server}.key,dh.pem,crl.pem} "$OPENVPN_DIR/"
     chmod 600 "$OPENVPN_DIR"/*.key
 }
+
 
 # 自动提取并分配IP
 get_available_ip() {
@@ -130,9 +139,9 @@ add_user() {
 
     echo "正在为用户 $username 分配IP: $client_ip"
     
-    # 签发客户端证书
+    # 签发客户端证书（非交互式）
     cd "$EASY_RSA_DIR" || exit
-    ./easyrsa build-client-full "$username" nopass
+    ./easyrsa --batch build-client-full "$username" nopass
     
     # 生成客户端配置
     awk -v cert="$(cat "pki/issued/$username.crt")" \
