@@ -129,7 +129,7 @@ init_config_dir
 
 while true; do
     show_menu
-    read -p "请选择操作1: " choice
+    read -p "请选择操作: " choice
     
     case $choice in
         1)
