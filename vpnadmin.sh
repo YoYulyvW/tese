@@ -1,59 +1,56 @@
 #!/bin/bash
-# OpenVPN用户管理脚本 (用户名/密码认证)
-# 支持: 创建用户 | 删除用户 | 修改密码 | 查看状态
-# 自动从Squid配置读取代理IP池
-# 确保每个用户流量通过独立代理IP处理
+# OpenVPN用户管理脚本 (纯VPN版)
+# 功能: 初始化 | 用户管理 | 状态监控
+# 特性:
+# 1. 自动安装OpenVPN依赖
+# 2. 用户名/密码认证
+# 3. 每个用户独立内网IP
+# 4. 强制所有流量通过VPN
 
 CONFIG_DIR="/etc/openvpn"
 USER_DB="$CONFIG_DIR/user-pass.db"
-SQUID_CONF="/etc/squid/squid.conf"
 VPN_NET="10.8.0.0/24"
-SQUID_PORT=3128
 CCD_DIR="$CONFIG_DIR/ccd"
 USER_IP_MAP="$CONFIG_DIR/user-ip.map"
+LOG_FILE="/var/log/vpnadmin.log"
+
+# 初始化日志
+init_log() {
+    touch "$LOG_FILE"
+    chmod 600 "$LOG_FILE"
+    exec > >(tee -a "$LOG_FILE") 2>&1
+}
 
 # 检查root权限
 check_root() {
-    [ "$EUID" -ne 0 ] && echo "错误: 需要root权限运行此脚本" && exit 1
+    [ "$EUID" -ne 0 ] && echo "错误: 需要root权限" | tee -a "$LOG_FILE" && exit 1
 }
 
-# 初始化目录和文件
-init_dirs() {
-    mkdir -p $CCD_DIR
-    touch $USER_IP_MAP
-    chmod 600 $USER_DB $USER_IP_MAP
-}
-
-# 从Squid配置提取代理IP池
-get_proxy_ips() {
-    # 提取所有http_port配置
-    local ports=($(grep -E '^http_port' $SQUID_CONF | awk '{print $2}'))
+# 安装OpenVPN依赖
+install_dependencies() {
+    echo "检查OpenVPN依赖..." | tee -a "$LOG_FILE"
     
-    # 提取IP地址
-    local ips=()
-    for port in "${ports[@]}"; do
-        # 处理IP:PORT格式
-        if [[ $port == *:* ]]; then
-            ips+=("${port%:*}")
-        # 处理纯端口格式
-        elif [[ $port =~ ^[0-9]+$ ]]; then
-            ips+=("0.0.0.0")
-        fi
-    done
-    
-    # 处理0.0.0.0情况（获取所有eth0 IP）
-    if [[ " ${ips[@]} " =~ " 0.0.0.0 " ]]; then
-        ips=($(ip -o -4 addr show dev eth0 | awk '{split($4, a, "/"); print a[1]}' | grep -v '^10\.8\.'))
+    if ! command -v openvpn &>/dev/null; then
+        echo "正在安装OpenVPN..." | tee -a "$LOG_FILE"
+        apt update -y >> "$LOG_FILE" 2>&1
+        apt install -y openvpn iptables-persistent easy-rsa >> "$LOG_FILE" 2>&1 || {
+            echo "安装失败! 查看日志: $LOG_FILE" | tee -a "$LOG_FILE"
+            exit 1
+        }
     fi
-    
-    # 去重并返回
-    printf "%s\n" "${ips[@]}" | sort -u
+}
+
+# 初始化目录结构
+init_dirs() {
+    mkdir -p "$CCD_DIR" "$CONFIG_DIR"
+    touch "$USER_DB" "$USER_IP_MAP"
+    chmod 600 "$USER_DB" "$USER_IP_MAP"
 }
 
 # 获取下一个可用VPN IP
 get_next_vpn_ip() {
     local base_ip="10.8.0"
-    local last_ip=$(grep -E "$base_ip\.[0-9]+$" $USER_IP_MAP | cut -d' ' -f2 | sort -t. -k4 -n | tail -1)
+    local last_ip=$(grep -E "$base_ip\.[0-9]+$" "$USER_IP_MAP" 2>/dev/null | cut -d' ' -f2 | sort -t. -k4 -n | tail -1)
     
     if [ -z "$last_ip" ]; then
         echo "${base_ip}.2"
@@ -63,20 +60,44 @@ get_next_vpn_ip() {
     fi
 }
 
+# 配置系统参数
+configure_system() {
+    echo "配置网络参数..." | tee -a "$LOG_FILE"
+    
+    # 启用IP转发
+    grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf || {
+        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+        sysctl -p >> "$LOG_FILE" 2>&1
+    }
+    
+    # 基础NAT规则
+    iptables -t nat -C POSTROUTING -s "$VPN_NET" -o eth0 -j MASQUERADE 2>/dev/null || {
+        iptables -t nat -A POSTROUTING -s "$VPN_NET" -o eth0 -j MASQUERADE
+    }
+    
+    # 保存iptables规则
+    iptables-save > /etc/iptables/rules.v4 2>> "$LOG_FILE"
+}
+
 # 初始化OpenVPN服务
 init_vpn() {
-    echo "正在初始化OpenVPN服务..."
+    echo "初始化OpenVPN配置..." | tee -a "$LOG_FILE"
     
-    # 安装必要软件
-    apt update >/dev/null 2>&1
-    apt install -y openvpn iptables-persistent >/dev/null 2>&1
-
-    # 创建基本配置
-    cat > $CONFIG_DIR/server.conf <<EOF
+    # 生成CA证书
+    [ ! -d "$CONFIG_DIR/easy-rsa" ] && {
+        make-cadir "$CONFIG_DIR/easy-rsa"
+        cd "$CONFIG_DIR/easy-rsa"
+        ./easyrsa init-pki
+        ./easyrsa build-ca nopass
+        ./easyrsa gen-dh
+    }
+    
+    # 创建服务配置
+    cat > "$CONFIG_DIR/server.conf" <<EOF
 port 1194
 proto udp
 dev tun
-server 10.8.0.0 255.255.255.0
+server ${VPN_NET%/*} 255.255.255.0
 keepalive 10 120
 user nobody
 group nogroup
@@ -84,7 +105,6 @@ persist-key
 persist-tun
 verb 3
 explicit-exit-notify 1
-client-to-client
 duplicate-cn
 auth-user-pass-verify $CONFIG_DIR/auth.sh via-file
 script-security 3
@@ -93,10 +113,14 @@ tmp-dir /dev/shm
 push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 8.8.8.8"
 client-config-dir $CCD_DIR
+ca $CONFIG_DIR/easy-rsa/pki/ca.crt
+cert $CONFIG_DIR/easy-rsa/pki/issued/server.crt
+key $CONFIG_DIR/easy-rsa/pki/private/server.key
+dh $CONFIG_DIR/easy-rsa/pki/dh.pem
 EOF
 
-    # 创建认证脚本
-    cat > $CONFIG_DIR/auth.sh <<'EOF'
+    # 认证脚本
+    cat > "$CONFIG_DIR/auth.sh" <<'EOF'
 #!/bin/bash
 [ "$script_type" != "user-pass-verify" ] && exit 1
 USER_DB="/etc/openvpn/user-pass.db"
@@ -109,188 +133,144 @@ while read -r line; do
 done < <(awk '!a[$1]++' "$USER_DB")
 exit 1
 EOF
-    chmod +x $CONFIG_DIR/auth.sh
+    chmod +x "$CONFIG_DIR/auth.sh"
 
-    # 创建空用户数据库
-    touch $USER_DB
-    chmod 600 $USER_DB
-
-    # 配置IP转发和防火墙
-    echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
-    sysctl -p >/dev/null
-
-    # 配置透明代理规则
-    iptables -t nat -A POSTROUTING -s $VPN_NET -o eth0 -j MASQUERADE
-    iptables -t nat -A PREROUTING -s $VPN_NET -p tcp --dport 80 -j REDIRECT --to-port $SQUID_PORT
-    iptables -t nat -A PREROUTING -s $VPN_NET -p tcp --dport 443 -j REDIRECT --to-port $SQUID_PORT
-    iptables-save > /etc/iptables/rules.v4
-
-    systemctl enable --now openvpn@server >/dev/null 2>&1
-    echo "OpenVPN服务已初始化完成!"
-    echo "代理IP池: ($(get_proxy_ips | tr '\n' ' '))"
+    # 启动服务
+    systemctl enable --now openvpn@server >> "$LOG_FILE" 2>&1
+    sleep 2
+    
+    if ! systemctl is-active --quiet openvpn@server; then
+        echo "OpenVPN启动失败! 检查日志: journalctl -u openvpn@server" | tee -a "$LOG_FILE"
+        exit 1
+    fi
+    
+    echo "OpenVPN服务已就绪" | tee -a "$LOG_FILE"
 }
 
-# 添加/修改VPN用户
+# 用户管理
 manage_user() {
     local action=$1 username=$2 password=$3
     
-    # 密码生成逻辑
+    # 密码生成
     if [ -z "$password" ]; then
         password=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 12)
-        echo "已生成随机密码: $password"
+        echo "生成密码: $password" | tee -a "$LOG_FILE"
     fi
 
     # 删除旧记录
-    sed -i "/^$username /d" $USER_DB
+    sed -i "/^$username /d" "$USER_DB"
     
     if [ "$action" = "add" ]; then
-        # 添加新用户
-        echo "$username $password" >> $USER_DB
-        
-        # 分配代理IP (轮询)
-        local proxy_ips=($(get_proxy_ips))
-        local proxy_count=${#proxy_ips[@]}
-        [ $proxy_count -eq 0 ] && echo "警告: 未找到代理IP" && return 1
-        
-        # 分配VPN IP
+        # 添加用户
+        echo "$username $password" >> "$USER_DB"
         local vpn_ip=$(get_next_vpn_ip)
         
-        # 获取当前用户索引
-        local user_count=$(grep -c . $USER_DB)
-        local user_index=$(( (user_count - 1) % proxy_count ))
-        local assigned_ip=${proxy_ips[$user_index]}
-        
-        # 创建CCD配置文件
-        cat > $CCD_DIR/$username <<EOF
+        # CCD配置
+        cat > "$CCD_DIR/$username" <<EOF
 ifconfig-push $vpn_ip 255.255.255.0
 push "route 0.0.0.0 0.0.0.0"
 EOF
         
-        # 添加SNAT规则
-        iptables -t nat -A POSTROUTING -s $vpn_ip -o eth0 -j SNAT --to-source $assigned_ip
+        # 记录IP分配
+        echo "$username $vpn_ip" >> "$USER_IP_MAP"
         
-        # 记录用户IP映射
-        echo "$username $vpn_ip $assigned_ip" >> $USER_IP_MAP
+        echo "用户添加成功:" | tee -a "$LOG_FILE"
+        echo "用户名: $username" | tee -a "$LOG_FILE"
+        echo "密码: $password" | tee -a "$LOG_FILE"
+        echo "内网IP: $vpn_ip" | tee -a "$LOG_FILE"
         
-        echo "用户 $username 已创建"
-        echo "VPN分配IP: $vpn_ip"
-        echo "代理出口IP: $assigned_ip"
-        echo "用户名: $username"
-        echo "密码: $password"
     elif [ "$action" = "del" ]; then
-        # 获取用户IP映射
-        local user_info=$(grep "^$username " $USER_IP_MAP)
-        if [ -n "$user_info" ]; then
-            local vpn_ip=$(echo $user_info | awk '{print $2}')
-            local proxy_ip=$(echo $user_info | awk '{print $3}')
-            
-            # 删除SNAT规则
-            iptables -t nat -D POSTROUTING -s $vpn_ip -o eth0 -j SNAT --to-source $proxy_ip 2>/dev/null
-            
-            # 删除CCD文件
-            rm -f $CCD_DIR/$username
-            
-            # 删除映射记录
-            sed -i "/^$username /d" $USER_IP_MAP
+        # 删除用户
+        if grep -q "^$username " "$USER_IP_MAP"; then
+            rm -f "$CCD_DIR/$username"
+            sed -i "/^$username /d" "$USER_IP_MAP"
+            echo "用户 $username 已删除" | tee -a "$LOG_FILE"
+        else
+            echo "用户 $username 不存在" | tee -a "$LOG_FILE"
         fi
-        
-        echo "用户 $username 已删除"
     fi
-    
-    # 保存防火墙规则
-    iptables-save > /etc/iptables/rules.v4
 }
 
-# 显示VPN状态
+# 状态检查
 show_status() {
-    # 服务状态
-    systemctl is-active openvpn@server >/dev/null && \
-        echo -e "OpenVPN状态: \e[32m运行中\e[0m" || \
-        echo -e "OpenVPN状态: \e[31m未运行\e[0m"
+    echo -e "\n===== VPN服务状态 =====" | tee -a "$LOG_FILE"
     
-    # 用户连接状态
-    echo -e "\n当前连接用户:"
-    if [ -f "/etc/openvpn/server/openvpn-status.log" ]; then
-        awk '/^CLIENT_LIST/{printf "%-15s %-20s %-15s %-15s\n", $2, $3, $4, "在线"}' /etc/openvpn/server/openvpn-status.log | sort
+    # 服务状态
+    if systemctl is-active --quiet openvpn@server; then
+        echo -e "状态: \e[32m运行中\e[0m" | tee -a "$LOG_FILE"
     else
-        echo "  无在线用户"
+        echo -e "状态: \e[31m未运行\e[0m" | tee -a "$LOG_FILE"
+    fi
+    
+    # 连接用户
+    echo -e "\n当前连接:" | tee -a "$LOG_FILE"
+    if [ -f "/etc/openvpn/server/openvpn-status.log" ]; then
+        awk '/^CLIENT_LIST/{printf "%-15s %-20s %-15s\n", $2, $3, $4}' "/etc/openvpn/server/openvpn-status.log" | tee -a "$LOG_FILE"
+    else
+        echo "无活跃连接" | tee -a "$LOG_FILE"
     fi
     
     # 用户列表
-    echo -e "\n已创建用户:"
-    if [ -s $USER_IP_MAP ]; then
+    echo -e "\n用户列表:" | tee -a "$LOG_FILE"
+    if [ -s "$USER_IP_MAP" ]; then
+        printf "%-15s %-15s\n" "用户名" "内网IP" | tee -a "$LOG_FILE"
         while read -r line; do
-            username=$(echo $line | awk '{print $1}')
-            vpn_ip=$(echo $line | awk '{print $2}')
-            proxy_ip=$(echo $line | awk '{print $3}')
-            printf "%-15s %-15s %-15s\n" $username $vpn_ip $proxy_ip
-        done < $USER_IP_MAP | sort
+            printf "%-15s %-15s\n" $(echo "$line" | awk '{print $1, $2}') | tee -a "$LOG_FILE"
+        done < "$USER_IP_MAP"
     else
-        echo "  无注册用户"
+        echo "无注册用户" | tee -a "$LOG_FILE"
     fi
     
-    # 代理IP池信息
-    echo -e "\n代理IP池 (来自Squid配置):"
-    local proxy_ips=($(get_proxy_ips))
-    if [ ${#proxy_ips[@]} -gt 0 ]; then
-        for ip in "${proxy_ips[@]}"; do
-            local user_count=$(grep -c "$ip$" $USER_IP_MAP)
-            echo "- $ip : $user_count 用户使用"
-        done
-    else
-        echo "  未找到有效代理IP"
-    fi
-    
-    # 流量统计
-    echo -e "\nVPN流量统计:"
-    iptables -nvL -t nat | grep -E "SNAT|REDIRECT" | awk '
-        /SNAT/ {printf "%-15s %-15s %-10s %-10s\n", $11, $9, $1, $2}
-        /REDIRECT/ {printf "%-15s %-15s %-10s %-10s\n", "HTTP/HTTPS", "所有用户", $1, $2}
-    '
+    # 路由信息
+    echo -e "\n路由表:" | tee -a "$LOG_FILE"
+    ip route show table all | grep -E "10.8.0|tun0" | tee -a "$LOG_FILE"
 }
 
 # 主程序
 check_root
-init_dirs
+init_log
 
 case "$1" in
     init)
+        install_dependencies
+        init_dirs
+        configure_system
         init_vpn
+        echo "初始化完成! 日志: $LOG_FILE" | tee -a "$LOG_FILE"
         ;;
     add)
-        if [ -z "$2" ]; then
-            echo "用法: $0 add <用户名> [密码]"
+        [ -z "$2" ] && {
+            echo "用法: $0 add <用户名> [密码]" | tee -a "$LOG_FILE"
             exit 1
-        fi
+        }
         manage_user "add" "$2" "$3"
         ;;
     del)
-        if [ -z "$2" ]; then
-            echo "用法: $0 del <用户名>"
+        [ -z "$2" ] && {
+            echo "用法: $0 del <用户名>" | tee -a "$LOG_FILE"
             exit 1
-        fi
+        }
         manage_user "del" "$2"
         ;;
     passwd)
-        if [ -z "$2" ] || [ -z "$3" ]; then
-            echo "用法: $0 passwd <用户名> <新密码>"
+        [ -z "$2" ] || [ -z "$3" ] && {
+            echo "用法: $0 passwd <用户名> <新密码>" | tee -a "$LOG_FILE"
             exit 1
-        fi
-        # 修改密码但不改变IP分配
-        sed -i "/^$2 /d" $USER_DB
-        echo "$2 $3" >> $USER_DB
-        echo "用户 $2 密码已更新"
+        }
+        sed -i "/^$2 /d" "$USER_DB"
+        echo "$2 $3" >> "$USER_DB"
+        echo "密码已修改" | tee -a "$LOG_FILE"
         ;;
     status)
         show_status
         ;;
     *)
-        echo "OpenVPN管理脚本 (用户名/密码认证)"
-        echo "用法: $0 {init|add|del|passwd|status}"
-        echo "  init    - 初始化VPN服务"
-        echo "  add     - 添加用户 (自动生成密码)"
-        echo "  del     - 删除用户"
-        echo "  passwd  - 修改用户密码"
-        echo "  status  - 查看服务状态"
+        echo "OpenVPN管理脚本" | tee -a "$LOG_FILE"
+        echo "用法: $0 {init|add|del|passwd|status}" | tee -a "$LOG_FILE"
+        echo "  init    - 初始化VPN服务" | tee -a "$LOG_FILE"
+        echo "  add     - 添加用户" | tee -a "$LOG_FILE"
+        echo "  del     - 删除用户" | tee -a "$LOG_FILE"
+        echo "  passwd  - 修改密码" | tee -a "$LOG_FILE"
+        echo "  status  - 查看状态" | tee -a "$LOG_FILE"
         exit 1
 esac
