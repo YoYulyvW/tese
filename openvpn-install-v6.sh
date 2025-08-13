@@ -384,10 +384,10 @@ Before=network.target
 [Service]
 Type=oneshot
 ExecStart=$iptables_path -t nat -A POSTROUTING -s 192.168.243.0/24 ! -d 192.168.243.0/24 -j SNAT --to $ip
-ExecStart=$iptables_path -I INPUT -p $protocol --dport $port -j ACCEPT
+ExecStart=$ip6tables_path -I INPUT -p udp --dport $port -j ACCEPT
 ExecStart=$iptables_path -I FORWARD -s 192.168.243.0/24 -j ACCEPT
 ExecStart=$iptables_path -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-ExecStop=$iptables_path -D INPUT -p $protocol --dport $port -j ACCEPT
+ExecStop=$ip6tables_path -D INPUT -p udp --dport $port -j ACCEPT
 ExecStop=$iptables_path -D FORWARD -s 192.168.243.0/24 -j ACCEPT
 ExecStop=$iptables_path -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" > /etc/systemd/system/openvpn-iptables.service
 		if [[ -n "$ip6" ]]; then
