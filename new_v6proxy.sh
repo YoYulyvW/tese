@@ -113,7 +113,7 @@ arrAddress="${arrAddress%,}"
 #    done
     
     # 使用 Cookie 进行请求
-    call_json='{"func_name":"ipv6","action":"edit","param":{"use_dns6":1,"ipv6_dns1":"fe80::1094:cfff:fe1c:6e01","ipv6_dns2":"fe80::1094:cfff:fe1c:6e01","linkaddr":"fe80::62be:b4ff:fe12:b220/64","prefix_len":"auto","ra_flags":"2","id":1,"enabled":"yes","leasetime":"120","interface":"lan1","parent":"adsl_cmcc_02","ra_static":0,"internet":"static","ipv6_addr":"","dhcpv6":1}}'
+    call_json='{"func_name":"ipv6","action":"edit","param":{"use_dns6":1,"ipv6_dns1":"2400:3200::1","ipv6_dns2":"2400:3200:baba::1","linkaddr":"fe80::62be:b4ff:fe14:56a4/64","prefix_len":"auto","ra_flags":"2","id":1,"enabled":"yes","leasetime":"120","interface":"lan1","parent":"adsl_cmcc_02","ra_static":0,"internet":"static","ipv6_addr":"","dhcpv6":1}}'
     # call_json='{"func_name":"ipv6","action":"edit","param":{"interface":"lan1","parent":"adsl_cmcc_02","internet":"static","linkaddr":"fe80::62be:b4ff:fe12:b220/64","dhcpv6":1,"use_dns6":1,"ipv6_dns1":"2409:805c:2000:3001::1000","leasetime":"120","ipv6_dns2":"2409:805c:2000:3000::1000","ra_static":0,"prefix_len":"auto","ra_flags":"0","id":1,"enabled":"yes","ipv6_addr":""}}'
     updated_json=$(echo "$call_json" | jq --arg arrAddress "$arrAddress" '.param.ipv6_addr = $arrAddress')
     cookie_data="login=1; $set_cookie; username=admin;"
@@ -308,7 +308,7 @@ monitor () {
 
             # 重启 systemd-networkd 服务
             systemctl restart systemd-networkd
-            echo -e "nameserver 223.5.5.5\nnameserver fe80::1094:cfff:fe1c:6e01%eth0" |  tee -a /etc/resolv.conf
+            echo -e "nameserver 223.5.5.5\nnameserver 2400:3200::1" |  tee -a /etc/resolv.conf
             systemctl restart systemd-resolved
 
             # 检查服务重启的退出状态码
