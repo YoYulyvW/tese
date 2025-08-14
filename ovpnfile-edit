@@ -1,6 +1,8 @@
 #!/bin/bash
 # -*- coding: UTF-8 -*-
 
+rm /root/openvpn-install.sh
+rm /root/openvpn-install-v6.sh
 
 # Armbian/Ubuntu arm64 一键换源脚本
 # 功能：自动选择最佳源，支持中科大/清华/官方ports源
@@ -26,7 +28,7 @@ clean_apt() {
     rm -f /var/lib/apt/lists/lock
     rm -f /var/lib/dpkg/lock
     rm -f /var/cache/apt/archives/lock
-    rm openvpn-install*
+    
 }
 
 # 检测最佳镜像源
