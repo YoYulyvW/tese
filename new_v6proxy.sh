@@ -27,7 +27,7 @@ generate_ipv4_addresses() {
     local current_ip=""
     
     for ((i=0; i<count; i++)); do
-        local base_ip="10.0.$((start + i))"
+        local base_ip="10.10.$((start + i))"
         for ((j=1; j<=250; j++)); do
             current_ip="$base_ip.$j/20"
             ipv4_cidrs+=("$current_ip")
@@ -52,8 +52,8 @@ previous_ipv6=""
 set_ikuai(){
   arrv6add=()
     # 目标URL
-    login_url="http://192.168.1.1/Action/login"
-    call_url="http://192.168.1.1/Action/call"
+    login_url="http://192.168.10.1/Action/login"
+    call_url="http://192.168.10.1/Action/call"
     
     # 登录
     login_json='{"username":"admin","passwd":"cf9aa02807d662d548e1a74c989168f9","pass":"c2FsdF8xMWEyNjgyNzIyMw==","remember_password":"true"}'
