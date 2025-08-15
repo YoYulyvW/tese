@@ -1,183 +1,137 @@
 #!/bin/bash
-# auto-snatd 安装/更新/卸载脚本（精确匹配目标 IP，清理旧规则）
-
+# Auto SNAT Daemon 安装/管理脚本
 SERVICE_NAME="auto-snatd"
-INSTALL_DIR="/usr/local/sbin"
+SCRIPT_PATH="/usr/local/sbin/$SERVICE_NAME"
 LOG_DIR="/root/snat_logs"
 LOG_FILE="$LOG_DIR/auto-snat.log"
-MAX_LOG_LINES=50
-TIMER_INTERVAL="4min"
+TIMER_FILE="/etc/systemd/system/$SERVICE_NAME.timer"
+SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+INTERVAL_MIN=4  # 定时器间隔
+
+mkdir -p "$LOG_DIR"
+chmod 700 "$LOG_DIR"
+
+# 日志函数
+log() {
+    echo "$(date '+%F %T') - $1" >> "$LOG_FILE"
+    # 保留最近50条
+    tail -n50 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+    # 日志轮转1M
+    if [ $(stat -c%s "$LOG_FILE") -gt 1048576 ]; then
+        mv "$LOG_FILE" "$LOG_FILE.old"
+        touch "$LOG_FILE"
+    fi
+}
 
 # 检查 root
 if [ "$(id -u)" -ne 0 ]; then
-    echo "❌ 请用 root 运行"
+    echo "❌ 请使用 root 用户运行此脚本"
     exit 1
 fi
 
-# 非首次安装判断
-if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ] || systemctl list-timers --all | grep -q "$SERVICE_NAME.timer"; then
-    echo "检测到已安装的 ${SERVICE_NAME} 服务"
-    read -rp "选择操作: [U]卸载 / [R]重新安装 / [Q]退出: " choice
-    case "$choice" in
-        U|u)
-            echo "➡ 卸载服务..."
-            systemctl stop "$SERVICE_NAME.timer" 2>/dev/null
-            systemctl disable "$SERVICE_NAME.timer" 2>/dev/null
-            systemctl stop "$SERVICE_NAME.service" 2>/dev/null
-            systemctl disable "$SERVICE_NAME.service" 2>/dev/null
-            rm -f "/etc/systemd/system/$SERVICE_NAME.service"
-            rm -f "/etc/systemd/system/$SERVICE_NAME.timer"
-            rm -f "$INSTALL_DIR/$SERVICE_NAME"
+# 非首次运行选项
+if systemctl list-unit-files | grep -q "$SERVICE_NAME"; then
+    echo "检测到已安装的 $SERVICE_NAME 服务"
+    read -p "选择操作: [U]卸载 / [R]重新安装 / [Q]退出: " CHOICE
+    case "$CHOICE" in
+        u|U)
+            systemctl stop "$SERVICE_NAME"
+            systemctl disable "$SERVICE_NAME"
+            rm -f "$SCRIPT_PATH" "$SERVICE_FILE" "$TIMER_FILE"
             systemctl daemon-reload
-            echo "✔ 已卸载，日志保留在 $LOG_DIR"
+            echo "✅ 已卸载 $SERVICE_NAME"
             exit 0
             ;;
-        R|r)
-            echo "➡ 重新安装服务..."
-            systemctl stop "$SERVICE_NAME.timer" 2>/dev/null
-            systemctl disable "$SERVICE_NAME.timer" 2>/dev/null
-            systemctl stop "$SERVICE_NAME.service" 2>/dev/null
-            systemctl disable "$SERVICE_NAME.service" 2>/dev/null
-            ;;
-        Q|q)
-            echo "❌ 退出，不做修改"
-            exit 0
+        r|R)
+            echo "⚡ 重新安装..."
             ;;
         *)
-            echo "❌ 无效选项"
-            exit 1
+            echo "❌ 退出，不做修改"
+            exit 0
             ;;
     esac
 fi
 
-# 创建日志目录
-mkdir -p "$LOG_DIR"
-chmod 700 "$LOG_DIR"
-
-# SNAT 更新脚本
-cat > "$INSTALL_DIR/$SERVICE_NAME" <<'EOF'
+# 生成守护脚本
+cat > "$SCRIPT_PATH" <<'EOF'
 #!/bin/bash
 LOG_DIR="/root/snat_logs"
 LOG_FILE="$LOG_DIR/auto-snat.log"
-MAX_LOG_LINES=50
 
 log() {
-    [ -d "$LOG_DIR" ] || mkdir -p "$LOG_DIR"
-    [ -f "$LOG_FILE" ] || touch "$LOG_FILE"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
-    if [ "$(wc -l < "$LOG_FILE")" -gt "$MAX_LOG_LINES" ]; then
-        tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+    echo "$(date '+%F %T') - $1" >> "$LOG_FILE"
+    tail -n50 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+    if [ $(stat -c%s "$LOG_FILE") -gt 1048576 ]; then
+        mv "$LOG_FILE" "$LOG_FILE.old"
+        touch "$LOG_FILE"
     fi
 }
 
-check_network() {
-    ip -4 addr show eth0 &>/dev/null || { log "[错误] eth0 接口不存在"; return 1; }
-    ip -4 addr show tunx &>/dev/null || { log "[错误] tunx 接口不存在"; return 1; }
-    return 0
-}
-
 update_snat() {
-    TUNX_NET=$(ip -4 addr show tunx | awk '/inet /{print $2; exit}')
-    [ -z "$TUNX_NET" ] && { log "[错误] 获取 tunx IP 失败"; return 1; }
+    TUNX_IP=$(ip -4 addr show tunx | grep -oP 'inet \K[\d.]+')
+    TUNX_NET="${TUNX_IP%.*}.0/24"
+    ETH0_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
 
-    ETH0_IP=$(ip -4 addr show eth0 | awk '/inet / && $2 !~ /127/ {print $2; exit}' | cut -d/ -f1)
-    [ -z "$ETH0_IP" ] && { log "[错误] 获取 eth0 主 IP 失败"; return 1; }
-
-    # 获取现有 SNAT 规则目标 IP
-    CURRENT_TARGET=$(iptables -t nat -S POSTROUTING 2>/dev/null | while read -r RULE; do
-        if [[ "$RULE" =~ -s[[:space:]]+$TUNX_NET && "$RULE" =~ -o[[:space:]]+eth0 && "$RULE" =~ -j[[:space:]]+SNAT ]]; then
-            for i in $RULE; do
-                [[ "$i" == "--to-source" ]] && { read -r IP; echo "$IP"; break; }
-            done
-            break
-        fi
-    done)
+    # 获取现有规则目标 IP
+    CURRENT_TARGET=$(iptables -t nat -S POSTROUTING | grep "^-A POSTROUTING -s $TUNX_NET -o eth0 -j SNAT" | head -n1 | grep -oP '(?<=--to-source )[\d.]+')
 
     if [ "$CURRENT_TARGET" = "$ETH0_IP" ]; then
-        log "[信息] SNAT 规则已是最新 (目标IP: $ETH0_IP)"
+        log "信息: SNAT规则已是最新 (目标IP: $ETH0_IP)"
         return 0
     fi
 
     # 删除旧规则
-    while iptables -t nat -L POSTROUTING --line-numbers | grep -q "$TUNX_NET.*eth0.*SNAT"; do
-        LINE=$(iptables -t nat -L POSTROUTING --line-numbers | grep "$TUNX_NET.*eth0.*SNAT" | head -n1 | awk '{print $1}')
-        iptables -t nat -D POSTROUTING "$LINE"
+    for RULE in $(iptables -t nat -S POSTROUTING | grep "^-A POSTROUTING -s $TUNX_NET -o eth0 -j SNAT"); do
+        iptables -t nat ${RULE/-A /-D }
     done
 
     # 添加新规则
     iptables -t nat -A POSTROUTING -s "$TUNX_NET" -o eth0 -j SNAT --to-source "$ETH0_IP"
-    log "[操作] 更新 SNAT 规则: $TUNX_NET → $ETH0_IP"
-
-    # 持久化
-    if command -v iptables-save >/dev/null; then
-        iptables-save > /etc/iptables/rules.v4 2>/dev/null
-        log "[操作] 规则已持久化"
-    fi
+    iptables-save > /etc/iptables/rules.v4
+    log "操作: 更新 SNAT 规则: $TUNX_NET -> $ETH0_IP"
 }
 
-if check_network; then
-    update_snat
-else
-    log "[警告] 网络检查失败"
-fi
+update_snat
 EOF
 
-chmod 700 "$INSTALL_DIR/$SERVICE_NAME"
+chmod +x "$SCRIPT_PATH"
 
-# systemd 服务
-cat > "/etc/systemd/system/$SERVICE_NAME.service" <<EOF
+# 创建 systemd service
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Auto SNAT Update Service
+Description=Auto SNAT Daemon
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=$INSTALL_DIR/$SERVICE_NAME
-User=root
-Group=root
+ExecStart=$SCRIPT_PATH
 EOF
 
-# systemd 定时器
-cat > "/etc/systemd/system/$SERVICE_NAME.timer" <<EOF
+# 创建 systemd timer
+cat > "$TIMER_FILE" <<EOF
 [Unit]
-Description=Run Auto SNAT Update every $TIMER_INTERVAL
+Description=Run $SERVICE_NAME every $INTERVAL_MIN minutes
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=$TIMER_INTERVAL
+OnUnitActiveSec=$((INTERVAL_MIN * 60))s
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF
 
-# 启用定时器
 systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME.timer"
+systemctl enable --now "$TIMER_FILE"
+systemctl start "$SERVICE_NAME"
 
-# 安装完成后立即执行一次 SNAT 更新
-echo "➡ 立即执行一次 SNAT 检查/更新..."
-systemctl start "$SERVICE_NAME.service"
-sleep 1
+# 首次立即执行一次
+bash "$SCRIPT_PATH"
 
-# 获取当前 SNAT 目标 IP
-TUNX_NET=$(ip -4 addr show tunx | awk '/inet /{print $2; exit}')
-ETH0_IP=$(ip -4 addr show eth0 | awk '/inet / && $2 !~ /127/ {print $2; exit}' | cut -d/ -f1)
-CURRENT_TARGET=$(iptables -t nat -S POSTROUTING 2>/dev/null | while read -r RULE; do
-    if [[ "$RULE" =~ -s[[:space:]]+$TUNX_NET && "$RULE" =~ -o[[:space:]]+eth0 && "$RULE" =~ -j[[:space:]]+SNAT ]]; then
-        for i in $RULE; do
-            [[ "$i" == "--to-source" ]] && { read -r IP; echo "$IP"; break; }
-        done
-        break
-    fi
-done)
-[ -z "$CURRENT_TARGET" ] && CURRENT_TARGET="$ETH0_IP"
-
-echo -e "\n✔ 安装完成并已立即执行一次 SNAT 更新"
+echo "✔ 安装完成并已立即执行一次 SNAT 更新"
 echo "服务名称: $SERVICE_NAME"
 echo "日志目录: $LOG_DIR"
-echo "执行间隔: $TIMER_INTERVAL"
-echo "当前 SNAT 目标 IP: $CURRENT_TARGET"
+echo "执行间隔: $INTERVAL_MIN 分钟"
 echo "卸载/更新：重新运行本安装脚本"
-echo -e "\n当前定时器状态:"
+echo
 systemctl list-timers | grep "$SERVICE_NAME"
