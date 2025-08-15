@@ -15,7 +15,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # 如果已安装，给选项
-if systemctl list-units --full -all | grep -q "^${SERVICE_NAME}.service"; then
+if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
     echo "检测到已安装的 ${SERVICE_NAME} 服务"
     read -rp "选择操作: [U]卸载 / [R]重新安装 / [Q]退出: " choice
     case "$choice" in
@@ -49,6 +49,7 @@ if systemctl list-units --full -all | grep -q "^${SERVICE_NAME}.service"; then
             ;;
     esac
 fi
+
 
 # 创建日志目录
 mkdir -p "$LOG_DIR"
