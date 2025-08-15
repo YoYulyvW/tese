@@ -1,5 +1,5 @@
 #!/bin/bash
-# auto-snatd 安装/更新/卸载脚本（修正版，支持 eth0 多 IP）
+# auto-snatd 安装/更新/卸载脚本（修正版，SNAT 仅在目标 IP 变化时更新）
 
 SERVICE_NAME="auto-snatd"
 INSTALL_DIR="/usr/local/sbin"
@@ -92,12 +92,10 @@ update_snat() {
     ETH0_IP=$(ip -4 addr show eth0 | awk '/inet / && $2 !~ /127/ {print $2; exit}' | cut -d/ -f1)
     [ -z "$ETH0_IP" ] && { log "[错误] 获取 eth0 主 IP 失败"; return 1; }
 
-    # 检查现有规则
-    CURRENT_TARGET=$(iptables -t nat -S POSTROUTING 2>/dev/null \
-        | grep -m1 -P "\-s $SOURCE_NET .* -o eth0 .* -j SNAT" \
-        | sed -n 's/.*--to-source \([0-9.]\+\).*/\1/p')
-
-    if [ "$CURRENT_TARGET" = "$ETH0_IP" ]; then
+    # 检查现有规则是否已经存在目标 IP
+    EXISTING=$(iptables -t nat -L POSTROUTING -n --line-numbers | awk -v src="$SOURCE_NET" -v target="$ETH0_IP" \
+        '$1=="SNAT" && $4==src && $10==target {found=1} END{if(found) exit 0; else exit 1}')
+    if [ $? -eq 0 ]; then
         log "[信息] SNAT 规则已是最新 (目标IP: $ETH0_IP)"
         return 0
     fi
