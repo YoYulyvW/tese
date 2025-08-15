@@ -1,155 +1,151 @@
 #!/bin/bash
+# 安装/更新/卸载 SNAT 定时器服务
 
-# 配置参数
 SERVICE_NAME="auto-snatd"
 INSTALL_DIR="/usr/local/sbin"
-LOG_DIR="/root/snat_logs"  # 日志存放目录
+LOG_DIR="/root/snat_logs"
 LOG_FILE="$LOG_DIR/auto-snat.log"
+MAX_LOG_LINES=50
+TIMER_INTERVAL="4min"  # 定时器间隔
 
-# 检查root权限
+# 检查 root
 if [ "$(id -u)" -ne 0 ]; then
-    echo "❌ 请使用root用户运行此脚本!"
+    echo "❌ 请用 root 运行"
     exit 1
 fi
 
+# 如果已安装，给选项
+if systemctl list-units --full -all | grep -q "^${SERVICE_NAME}.service"; then
+    echo "检测到已安装的 ${SERVICE_NAME} 服务"
+    read -rp "选择操作: [U]卸载 / [R]重新安装 / [Q]退出: " choice
+    case "$choice" in
+        U|u)
+            echo "➡ 卸载服务..."
+            systemctl stop "$SERVICE_NAME.timer" 2>/dev/null
+            systemctl disable "$SERVICE_NAME.timer" 2>/dev/null
+            systemctl stop "$SERVICE_NAME.service" 2>/dev/null
+            systemctl disable "$SERVICE_NAME.service" 2>/dev/null
+            rm -f "/etc/systemd/system/$SERVICE_NAME.service"
+            rm -f "/etc/systemd/system/$SERVICE_NAME.timer"
+            rm -f "$INSTALL_DIR/$SERVICE_NAME"
+            systemctl daemon-reload
+            echo "✔ 已卸载，日志保留在 $LOG_DIR"
+            exit 0
+            ;;
+        R|r)
+            echo "➡ 重新安装服务..."
+            systemctl stop "$SERVICE_NAME.timer" 2>/dev/null
+            systemctl disable "$SERVICE_NAME.timer" 2>/dev/null
+            systemctl stop "$SERVICE_NAME.service" 2>/dev/null
+            systemctl disable "$SERVICE_NAME.service" 2>/dev/null
+            ;;
+        Q|q)
+            echo "❌ 退出，不做修改"
+            exit 0
+            ;;
+        *)
+            echo "❌ 无效选项"
+            exit 1
+            ;;
+    esac
+fi
+
 # 创建日志目录
-mkdir -p $LOG_DIR
-chmod 700 $LOG_DIR
+mkdir -p "$LOG_DIR"
+chmod 700 "$LOG_DIR"
 
-# 生成守护脚本
-cat > $INSTALL_DIR/$SERVICE_NAME <<'EOF'
+# 守护脚本（执行一次 SNAT 检查/更新）
+cat > "$INSTALL_DIR/$SERVICE_NAME" <<'EOF'
 #!/bin/bash
-
-# 日志配置
 LOG_DIR="/root/snat_logs"
 LOG_FILE="$LOG_DIR/auto-snat.log"
-MAX_LOG_SIZE=1048576  # 1MB
+MAX_LOG_LINES=50
 
-# 日志记录函数
 log() {
-    # 确保日志文件存在
-    [ -d "$LOG_DIR" ] || mkdir -p $LOG_DIR
-    [ -f "$LOG_FILE" ] || touch $LOG_FILE
-    
-    # 日志轮转（如果超过最大大小）
-    if [ $(stat -c%s "$LOG_FILE") -gt $MAX_LOG_SIZE ]; then
-        mv "$LOG_FILE" "$LOG_FILE.old"
+    [ -d "$LOG_DIR" ] || mkdir -p "$LOG_DIR"
+    [ -f "$LOG_FILE" ] || touch "$LOG_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+    # 保留最近 50 条日志
+    if [ "$(wc -l < "$LOG_FILE")" -gt "$MAX_LOG_LINES" ]; then
+        tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
     fi
-    
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> $LOG_FILE
 }
 
-# 网络检测函数
 check_network() {
-    # 检测tunx接口
-    if ! ip -4 addr show tunx &>/dev/null; then
-        log "[错误] tunx接口不存在"
-        return 1
-    fi
-    
-    # 检测eth0接口
-    if ! ip -4 addr show eth0 &>/dev/null; then
-        log "[错误] eth0接口不存在"
-        return 1
-    fi
+    ip -4 addr show eth0 &>/dev/null || { log "[错误] eth0 接口不存在"; return 1; }
     return 0
 }
 
-# SNAT规则更新函数
 update_snat() {
-    # 获取tunx网络信息
-    TUNX_INFO=$(ip -4 addr show tunx | grep -oP 'inet \K[\d./]+')
-    IFS='/' read -r TUNX_IP TUNX_CIDR <<< "$TUNX_INFO"
-    
-    # 计算源网络
-    IFS='.' read -r ip1 ip2 ip3 ip4 <<< "$TUNX_IP"
-    MASK=$((0xffffffff << (32 - TUNX_CIDR) & 0xffffffff))
-    NETWORK="$((ip1 & (MASK >> 24))).$((ip2 & (MASK >> 16 & 0xff))).$((ip3 & (MASK >> 8 & 0xff))).$((ip4 & (MASK & 0xff)))"
-    SOURCE_NET="$NETWORK/$TUNX_CIDR"
-    
-    # 获取eth0当前IP
     ETH0_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-    
-    # 检查现有规则
-    CURRENT_TARGET=$(iptables -t nat -L POSTROUTING -n -v 2>/dev/null | grep -oP "SNAT\s+all\s+.*to:\K[\d.]+" | head -n1)
-    
+    [ -z "$ETH0_IP" ] && { log "[错误] 获取 eth0 IP 失败"; return 1; }
+
+    CURRENT_TARGET=$(iptables -t nat -S POSTROUTING 2>/dev/null \
+        | grep -m1 "\-j SNAT" \
+        | sed -n 's/.*--to-source \([0-9.]\+\).*/\1/p')
+
     if [ "$CURRENT_TARGET" = "$ETH0_IP" ]; then
-        log "[信息] SNAT规则已是最新 (目标IP: $ETH0_IP)"
+        log "[信息] SNAT 规则已是最新 (目标IP: $ETH0_IP)"
         return 0
     fi
-    
-    # 更新规则
-    log "[操作] 更新SNAT规则: $SOURCE_NET → $ETH0_IP"
+
+    log "[操作] 更新 SNAT 规则 → $ETH0_IP"
     iptables -t nat -F POSTROUTING 2>/dev/null
-    iptables -t nat -A POSTROUTING -s "$SOURCE_NET" -j SNAT --to-source "$ETH0_IP"
-    
-    # 持久化
+    iptables -t nat -A POSTROUTING -j SNAT --to-source "$ETH0_IP"
+
     if command -v iptables-save >/dev/null; then
         iptables-save > /etc/iptables/rules.v4 2>/dev/null
         log "[操作] 规则已持久化"
     fi
 }
 
-# 主循环
-log "[启动] SNAT守护服务启动"
-while true; do
-    if check_network; then
-        update_snat
-    else
-        log "[警告] 网络检查失败，等待重试..."
-    fi
-    sleep 60
-done
+if check_network; then
+    update_snat
+else
+    log "[警告] 网络检查失败"
+fi
 EOF
+chmod 700 "$INSTALL_DIR/$SERVICE_NAME"
 
-# 设置权限
-chmod 700 $INSTALL_DIR/$SERVICE_NAME
-
-# 创建systemd服务
-cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
+# systemd 服务（单次执行）
+cat > "/etc/systemd/system/$SERVICE_NAME.service" <<EOF
 [Unit]
-Description=Auto SNAT Daemon
+Description=Auto SNAT Update Service
 After=network.target
-StartLimitIntervalSec=60
 
 [Service]
-Type=simple
+Type=oneshot
 ExecStart=$INSTALL_DIR/$SERVICE_NAME
-Restart=always
-RestartSec=5s
 User=root
 Group=root
+EOF
 
-# 日志限制
-LogRateLimitIntervalSec=60
-LogRateLimitBurst=100
+# systemd 定时器
+cat > "/etc/systemd/system/$SERVICE_NAME.timer" <<EOF
+[Unit]
+Description=Run Auto SNAT Update every $TIMER_INTERVAL
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=$TIMER_INTERVAL
+Persistent=true
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=timers.target
 EOF
 
-# 启用服务
+# 启用定时器
 systemctl daemon-reload
-systemctl enable --now $SERVICE_NAME.service
+systemctl enable --now "$SERVICE_NAME.timer"
 
-# 创建卸载脚本
-cat > $INSTALL_DIR/uninstall-$SERVICE_NAME <<EOF
-#!/bin/bash
-systemctl stop $SERVICE_NAME
-systemctl disable $SERVICE_NAME
-rm -f /etc/systemd/system/$SERVICE_NAME.service
-rm -f $INSTALL_DIR/$SERVICE_NAME
-systemctl daemon-reload
-echo "服务已卸载"
-echo "日志文件仍保留在: $LOG_DIR"
-EOF
-chmod +x $INSTALL_DIR/uninstall-$SERVICE_NAME
+# <<< 新增：立即执行一次 SNAT 更新
+echo "➡ 立即执行一次 SNAT 检查/更新..."
+systemctl start "$SERVICE_NAME.service"
 
-# 完成提示
-echo -e "\n\033[32m✔ 安装完成\033[0m"
+echo -e "\n\033[32m✔ 安装完成并已立即执行一次 SNAT 更新\033[0m"
 echo "服务名称: $SERVICE_NAME"
 echo "日志目录: $LOG_DIR"
-echo "检测间隔: 60秒"
-echo "卸载命令: $INSTALL_DIR/uninstall-$SERVICE_NAME"
-echo -e "\n当前状态:"
-systemctl status $SERVICE_NAME --no-pager | grep -A 3 "Active:"
+echo "执行间隔: $TIMER_INTERVAL"
+echo "卸载/更新：重新运行本安装脚本"
+echo -e "\n当前定时器状态:"
+systemctl list-timers | grep "$SERVICE_NAME"
