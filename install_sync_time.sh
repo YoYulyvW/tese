@@ -99,11 +99,9 @@ update_snat() {
     fi
 
     # 删除旧规则
-    iptables -t nat -S POSTROUTING 2>/dev/null | while read -r RULE; do
-        if [[ "$RULE" =~ -s[[:space:]]+$TUNX_NET && "$RULE" =~ -o[[:space:]]+eth0 && "$RULE" =~ -j[[:space:]]+SNAT ]]; then
-            RULE_DELETE=$(echo "$RULE" | sed 's/^-A /-D /')
-            iptables -t nat $RULE_DELETE
-        fi
+    while iptables -t nat -L POSTROUTING --line-numbers | grep -q "$TUNX_NET.*eth0.*SNAT"; do
+        LINE_NUM=$(iptables -t nat -L POSTROUTING --line-numbers | grep "$TUNX_NET.*eth0.*SNAT" | head -n1 | awk '{print $1}')
+        iptables -t nat -D POSTROUTING "$LINE_NUM"
     done
 
     # 添加新规则
