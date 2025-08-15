@@ -1,12 +1,12 @@
 #!/bin/bash
-# 安装/更新/卸载 SNAT 定时器服务（最终修正版）
+# auto-snatd 安装/更新/卸载脚本（最终版）
 
 SERVICE_NAME="auto-snatd"
 INSTALL_DIR="/usr/local/sbin"
 LOG_DIR="/root/snat_logs"
 LOG_FILE="$LOG_DIR/auto-snat.log"
 MAX_LOG_LINES=50
-TIMER_INTERVAL="4min"  # 定时器间隔
+TIMER_INTERVAL="4min"
 
 # 检查 root
 if [ "$(id -u)" -ne 0 ]; then
@@ -54,7 +54,7 @@ fi
 mkdir -p "$LOG_DIR"
 chmod 700 "$LOG_DIR"
 
-# SNAT 更新脚本（单次执行）
+# SNAT 更新脚本
 cat > "$INSTALL_DIR/$SERVICE_NAME" <<'EOF'
 #!/bin/bash
 LOG_DIR="/root/snat_logs"
@@ -72,15 +72,29 @@ log() {
 
 check_network() {
     ip -4 addr show eth0 &>/dev/null || { log "[错误] eth0 接口不存在"; return 1; }
+    ip -4 addr show tunx &>/dev/null || { log "[错误] tunx 接口不存在"; return 1; }
     return 0
 }
 
 update_snat() {
+    # 获取 tunx 网络
+    TUNX_INFO=$(ip -4 addr show tunx | grep -oP 'inet \K[\d./]+')
+    [ -z "$TUNX_INFO" ] && { log "[错误] tunx IP 获取失败"; return 1; }
+    IFS='/' read -r TUNX_IP TUNX_CIDR <<< "$TUNX_INFO"
+
+    # 计算源网段
+    IFS='.' read -r ip1 ip2 ip3 ip4 <<< "$TUNX_IP"
+    MASK=$((0xffffffff << (32 - TUNX_CIDR) & 0xffffffff))
+    NETWORK="$((ip1 & (MASK >> 24))).$((ip2 & (MASK >> 16 & 0xff))).$((ip3 & (MASK >> 8 & 0xff))).$((ip4 & (MASK & 0xff)))"
+    SOURCE_NET="$NETWORK/$TUNX_CIDR"
+
+    # 获取 eth0 IP
     ETH0_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
     [ -z "$ETH0_IP" ] && { log "[错误] 获取 eth0 IP 失败"; return 1; }
 
+    # 检查现有规则
     CURRENT_TARGET=$(iptables -t nat -S POSTROUTING 2>/dev/null \
-        | grep -m1 "\-j SNAT" \
+        | grep -m1 -P "\-s $SOURCE_NET .* -o eth0 .* -j SNAT" \
         | sed -n 's/.*--to-source \([0-9.]\+\).*/\1/p')
 
     if [ "$CURRENT_TARGET" = "$ETH0_IP" ]; then
@@ -88,10 +102,18 @@ update_snat() {
         return 0
     fi
 
-    log "[操作] 更新 SNAT 规则 → $ETH0_IP"
-    iptables -t nat -F POSTROUTING 2>/dev/null
-    iptables -t nat -A POSTROUTING -j SNAT --to-source "$ETH0_IP"
+    # 删除旧规则
+    iptables -t nat -S POSTROUTING 2>/dev/null | grep -P "\-s $SOURCE_NET .* -o eth0 .* -j SNAT" \
+        | while read -r RULE; do
+            RULE_DELETE=$(echo "$RULE" | sed 's/^-A /-D /')
+            iptables -t nat $RULE_DELETE
+        done
 
+    # 添加新规则
+    iptables -t nat -A POSTROUTING -s "$SOURCE_NET" -o eth0 -j SNAT --to-source "$ETH0_IP"
+    log "[操作] 更新 SNAT 规则: $SOURCE_NET → $ETH0_IP"
+
+    # 持久化
     if command -v iptables-save >/dev/null; then
         iptables-save > /etc/iptables/rules.v4 2>/dev/null
         log "[操作] 规则已持久化"
@@ -104,9 +126,10 @@ else
     log "[警告] 网络检查失败"
 fi
 EOF
+
 chmod 700 "$INSTALL_DIR/$SERVICE_NAME"
 
-# systemd 服务（单次执行）
+# systemd 服务
 cat > "/etc/systemd/system/$SERVICE_NAME.service" <<EOF
 [Unit]
 Description=Auto SNAT Update Service
@@ -137,14 +160,17 @@ EOF
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME.timer"
 
-# 安装完成后立即运行一次 SNAT 更新
+# 安装完成后立即执行一次 SNAT 更新
 echo "➡ 立即执行一次 SNAT 检查/更新..."
 systemctl start "$SERVICE_NAME.service"
+sleep 1
 
-# 输出当前 SNAT 目标 IP
+# 获取当前 SNAT 规则目标 IP
+ETH0_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
 CURRENT_IP=$(iptables -t nat -S POSTROUTING 2>/dev/null \
-    | grep -m1 "\-j SNAT" \
+    | grep -m1 -P "\-o eth0 .* -j SNAT" \
     | sed -n 's/.*--to-source \([0-9.]\+\).*/\1/p')
+[ -z "$CURRENT_IP" ] && CURRENT_IP="$ETH0_IP"
 
 echo -e "\n✔ 安装完成并已立即执行一次 SNAT 更新"
 echo "服务名称: $SERVICE_NAME"
