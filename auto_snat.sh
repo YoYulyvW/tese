@@ -1,5 +1,5 @@
 #!/bin/bash
-# 安装/更新/卸载 SNAT 定时器服务（最终版）
+# 安装/更新/卸载 SNAT 定时器服务（最终修正版）
 
 SERVICE_NAME="auto-snatd"
 INSTALL_DIR="/usr/local/sbin"
@@ -15,7 +15,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # 非首次安装判断
-if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
+if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ] || systemctl list-timers --all | grep -q "$SERVICE_NAME.timer"; then
     echo "检测到已安装的 ${SERVICE_NAME} 服务"
     read -rp "选择操作: [U]卸载 / [R]重新安装 / [Q]退出: " choice
     case "$choice" in
@@ -137,11 +137,11 @@ EOF
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME.timer"
 
-# <<< 安装完成后立即运行一次 SNAT 更新
+# 安装完成后立即运行一次 SNAT 更新
 echo "➡ 立即执行一次 SNAT 检查/更新..."
 systemctl start "$SERVICE_NAME.service"
 
-# <<< 输出当前 SNAT 目标 IP
+# 输出当前 SNAT 目标 IP
 CURRENT_IP=$(iptables -t nat -S POSTROUTING 2>/dev/null \
     | grep -m1 "\-j SNAT" \
     | sed -n 's/.*--to-source \([0-9.]\+\).*/\1/p')
