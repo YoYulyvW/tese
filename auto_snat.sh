@@ -1,5 +1,5 @@
 #!/bin/bash
-# auto-snatd 安装/更新/卸载脚本（最终版）
+# auto-snatd 安装/更新/卸载脚本（修正版，支持 eth0 多 IP）
 
 SERVICE_NAME="auto-snatd"
 INSTALL_DIR="/usr/local/sbin"
@@ -88,9 +88,9 @@ update_snat() {
     NETWORK="$((ip1 & (MASK >> 24))).$((ip2 & (MASK >> 16 & 0xff))).$((ip3 & (MASK >> 8 & 0xff))).$((ip4 & (MASK & 0xff)))"
     SOURCE_NET="$NETWORK/$TUNX_CIDR"
 
-    # 获取 eth0 IP
-    ETH0_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-    [ -z "$ETH0_IP" ] && { log "[错误] 获取 eth0 IP 失败"; return 1; }
+    # 获取 eth0 主 IP（忽略 secondary IP）
+    ETH0_IP=$(ip -4 addr show eth0 | awk '/inet / && $2 !~ /127/ {print $2; exit}' | cut -d/ -f1)
+    [ -z "$ETH0_IP" ] && { log "[错误] 获取 eth0 主 IP 失败"; return 1; }
 
     # 检查现有规则
     CURRENT_TARGET=$(iptables -t nat -S POSTROUTING 2>/dev/null \
@@ -166,7 +166,7 @@ systemctl start "$SERVICE_NAME.service"
 sleep 1
 
 # 获取当前 SNAT 规则目标 IP
-ETH0_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+ETH0_IP=$(ip -4 addr show eth0 | awk '/inet / && $2 !~ /127/ {print $2; exit}' | cut -d/ -f1)
 CURRENT_IP=$(iptables -t nat -S POSTROUTING 2>/dev/null \
     | grep -m1 -P "\-o eth0 .* -j SNAT" \
     | sed -n 's/.*--to-source \([0-9.]\+\).*/\1/p')
