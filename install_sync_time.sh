@@ -1,5 +1,5 @@
 #!/bin/bash
-# auto-snatd 安装/更新/卸载脚本（精准匹配目标 IP）
+# auto-snatd 安装/更新/卸载脚本（精确匹配目标 IP，清理旧规则）
 
 SERVICE_NAME="auto-snatd"
 INSTALL_DIR="/usr/local/sbin"
@@ -84,10 +84,14 @@ update_snat() {
     [ -z "$ETH0_IP" ] && { log "[错误] 获取 eth0 主 IP 失败"; return 1; }
 
     # 获取现有 SNAT 规则目标 IP
-    CURRENT_TARGET=$(iptables -t nat -S POSTROUTING 2>/dev/null | awk -v net="$TUNX_NET" -v oif="eth0" '
-        $0 ~ "-s "net && $0 ~ "-o "oif && $0 ~ "-j SNAT" {
-            for(i=1;i<=NF;i++){ if($i=="--to-source"){print $(i+1); exit} }
-        }')
+    CURRENT_TARGET=$(iptables -t nat -S POSTROUTING 2>/dev/null | while read -r RULE; do
+        if [[ "$RULE" =~ -s[[:space:]]+$TUNX_NET && "$RULE" =~ -o[[:space:]]+eth0 && "$RULE" =~ -j[[:space:]]+SNAT ]]; then
+            for i in $RULE; do
+                [[ "$i" == "--to-source" ]] && { read -r IP; echo "$IP"; break; }
+            done
+            break
+        fi
+    done)
 
     if [ "$CURRENT_TARGET" = "$ETH0_IP" ]; then
         log "[信息] SNAT 规则已是最新 (目标IP: $ETH0_IP)"
@@ -95,11 +99,12 @@ update_snat() {
     fi
 
     # 删除旧规则
-    iptables -t nat -S POSTROUTING 2>/dev/null | grep "\-s $TUNX_NET .* -o eth0 .* -j SNAT" \
-        | while read -r RULE; do
+    iptables -t nat -S POSTROUTING 2>/dev/null | while read -r RULE; do
+        if [[ "$RULE" =~ -s[[:space:]]+$TUNX_NET && "$RULE" =~ -o[[:space:]]+eth0 && "$RULE" =~ -j[[:space:]]+SNAT ]]; then
             RULE_DELETE=$(echo "$RULE" | sed 's/^-A /-D /')
             iptables -t nat $RULE_DELETE
-        done
+        fi
+    done
 
     # 添加新规则
     iptables -t nat -A POSTROUTING -s "$TUNX_NET" -o eth0 -j SNAT --to-source "$ETH0_IP"
@@ -160,11 +165,14 @@ sleep 1
 # 获取当前 SNAT 目标 IP
 TUNX_NET=$(ip -4 addr show tunx | awk '/inet /{print $2; exit}')
 ETH0_IP=$(ip -4 addr show eth0 | awk '/inet / && $2 !~ /127/ {print $2; exit}' | cut -d/ -f1)
-CURRENT_TARGET=$(iptables -t nat -S POSTROUTING 2>/dev/null | awk -v net="$TUNX_NET" -v oif="eth0" '
-    $0 ~ "-s "net && $0 ~ "-o "oif && $0 ~ "-j SNAT" {
-        for(i=1;i<=NF;i++){ if($i=="--to-source"){print $(i+1); exit} }
-    }')
-
+CURRENT_TARGET=$(iptables -t nat -S POSTROUTING 2>/dev/null | while read -r RULE; do
+    if [[ "$RULE" =~ -s[[:space:]]+$TUNX_NET && "$RULE" =~ -o[[:space:]]+eth0 && "$RULE" =~ -j[[:space:]]+SNAT ]]; then
+        for i in $RULE; do
+            [[ "$i" == "--to-source" ]] && { read -r IP; echo "$IP"; break; }
+        done
+        break
+    fi
+done)
 [ -z "$CURRENT_TARGET" ] && CURRENT_TARGET="$ETH0_IP"
 
 echo -e "\n✔ 安装完成并已立即执行一次 SNAT 更新"
