@@ -1,5 +1,5 @@
 #!/bin/bash
-# 安装/更新/卸载 SNAT 定时器服务
+# 安装/更新/卸载 SNAT 定时器服务（最终版）
 
 SERVICE_NAME="auto-snatd"
 INSTALL_DIR="/usr/local/sbin"
@@ -14,7 +14,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# 如果已安装，给选项
+# 非首次安装判断
 if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
     echo "检测到已安装的 ${SERVICE_NAME} 服务"
     read -rp "选择操作: [U]卸载 / [R]重新安装 / [Q]退出: " choice
@@ -50,12 +50,11 @@ if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
     esac
 fi
 
-
 # 创建日志目录
 mkdir -p "$LOG_DIR"
 chmod 700 "$LOG_DIR"
 
-# 守护脚本（执行一次 SNAT 检查/更新）
+# SNAT 更新脚本（单次执行）
 cat > "$INSTALL_DIR/$SERVICE_NAME" <<'EOF'
 #!/bin/bash
 LOG_DIR="/root/snat_logs"
@@ -66,7 +65,6 @@ log() {
     [ -d "$LOG_DIR" ] || mkdir -p "$LOG_DIR"
     [ -f "$LOG_FILE" ] || touch "$LOG_FILE"
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
-    # 保留最近 50 条日志
     if [ "$(wc -l < "$LOG_FILE")" -gt "$MAX_LOG_LINES" ]; then
         tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
     fi
@@ -139,14 +137,20 @@ EOF
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME.timer"
 
-# <<< 新增：立即执行一次 SNAT 更新
+# <<< 安装完成后立即运行一次 SNAT 更新
 echo "➡ 立即执行一次 SNAT 检查/更新..."
 systemctl start "$SERVICE_NAME.service"
 
-echo -e "\n\033[32m✔ 安装完成并已立即执行一次 SNAT 更新\033[0m"
+# <<< 输出当前 SNAT 目标 IP
+CURRENT_IP=$(iptables -t nat -S POSTROUTING 2>/dev/null \
+    | grep -m1 "\-j SNAT" \
+    | sed -n 's/.*--to-source \([0-9.]\+\).*/\1/p')
+
+echo -e "\n✔ 安装完成并已立即执行一次 SNAT 更新"
 echo "服务名称: $SERVICE_NAME"
 echo "日志目录: $LOG_DIR"
 echo "执行间隔: $TIMER_INTERVAL"
+echo "当前 SNAT 目标 IP: $CURRENT_IP"
 echo "卸载/更新：重新运行本安装脚本"
 echo -e "\n当前定时器状态:"
 systemctl list-timers | grep "$SERVICE_NAME"
