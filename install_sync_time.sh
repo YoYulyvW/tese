@@ -100,8 +100,8 @@ update_snat() {
 
     # 删除旧规则
     while iptables -t nat -L POSTROUTING --line-numbers | grep -q "$TUNX_NET.*eth0.*SNAT"; do
-        LINE_NUM=$(iptables -t nat -L POSTROUTING --line-numbers | grep "$TUNX_NET.*eth0.*SNAT" | head -n1 | awk '{print $1}')
-        iptables -t nat -D POSTROUTING "$LINE_NUM"
+        LINE=$(iptables -t nat -L POSTROUTING --line-numbers | grep "$TUNX_NET.*eth0.*SNAT" | head -n1 | awk '{print $1}')
+        iptables -t nat -D POSTROUTING "$LINE"
     done
 
     # 添加新规则
