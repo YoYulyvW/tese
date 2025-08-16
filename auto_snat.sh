@@ -1,13 +1,11 @@
 #!/bin/bash
-# Auto SNAT Daemon 完整优化版 (保持/root日志路径)
+# Auto SNAT Daemon
 # 版本: 2.1
-# 作者: 您的名字
-# 最后更新: $(date +%Y-%m-%d)
 
 ### 配置区 (用户可自定义) ###
 SERVICE_NAME="auto-snatd"
 SCRIPT_PATH="/usr/local/sbin/$SERVICE_NAME"
-LOG_DIR="/root/snat_logs"  # 保持原路径
+LOG_DIR="/root/snat_logs"  
 LOG_FILE="$LOG_DIR/auto-snat.log"
 TIMER_FILE="/etc/systemd/system/$SERVICE_NAME.timer"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
