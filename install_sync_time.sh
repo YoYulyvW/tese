@@ -1,137 +1,176 @@
 #!/bin/bash
-# Auto SNAT Daemon 安装/管理脚本
-SERVICE_NAME="auto-snatd"
-SCRIPT_PATH="/usr/local/sbin/$SERVICE_NAME"
-LOG_DIR="/root/snat_logs"
-LOG_FILE="$LOG_DIR/auto-snat.log"
-TIMER_FILE="/etc/systemd/system/$SERVICE_NAME.timer"
-SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
-INTERVAL_MIN=4  # 定时器间隔
+# Amlogic S9xxx Armbian 北京时间自动同步管理脚本
+# 首次运行：安装并启用开机同步 + 每4分钟自动同步
+# 后续运行：可选择卸载，或修复缺失的定时器
 
-mkdir -p "$LOG_DIR"
-chmod 700 "$LOG_DIR"
+SERVICE_FILE="/etc/systemd/system/sync-time.service"
+TIMER_SERVICE_FILE="/etc/systemd/system/sync-time.timer"
+TIMER_UNIT_FILE="/etc/systemd/system/sync-time-task.service"
+SCRIPT_FILE="/usr/local/bin/sync_time.sh"
+LOG_FILE="/root/sync_time.log"
 
-# 日志函数
-log() {
-    echo "$(date '+%F %T') - $1" >> "$LOG_FILE"
-    # 保留最近50条
-    tail -n50 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
-    # 日志轮转1M
-    if [ $(stat -c%s "$LOG_FILE") -gt 1048576 ]; then
-        mv "$LOG_FILE" "$LOG_FILE.old"
-        touch "$LOG_FILE"
+# 限制日志行数（保留最近 50 行）
+limit_log_size() {
+    if [[ -f "$LOG_FILE" ]]; then
+        local lines
+        lines=$(wc -l < "$LOG_FILE")
+        if (( lines > 50 )); then
+            tail -n 50 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+        fi
     fi
 }
 
-# 检查 root
-if [ "$(id -u)" -ne 0 ]; then
-    echo "❌ 请使用 root 用户运行此脚本"
-    exit 1
-fi
+# 检查是否已安装
+if [[ -f "$SERVICE_FILE" ]]; then
+    if [[ -f "$TIMER_SERVICE_FILE" && -f "$TIMER_UNIT_FILE" ]]; then
+        echo "=== 检测到已安装开机同步 + 定时器 ==="
+        read -p "是否要卸载服务与定时器? (y/N): " choice
+        case "$choice" in
+            y|Y)
+                echo "[1/5] 停止并禁用服务和定时器..."
+                systemctl stop sync-time.timer sync-time.service sync-time-task.service
+                systemctl disable sync-time.timer sync-time.service sync-time-task.service
 
-# 非首次运行选项
-if systemctl list-unit-files | grep -q "$SERVICE_NAME"; then
-    echo "检测到已安装的 $SERVICE_NAME 服务"
-    read -p "选择操作: [U]卸载 / [R]重新安装 / [Q]退出: " CHOICE
-    case "$CHOICE" in
-        u|U)
-            systemctl stop "$SERVICE_NAME"
-            systemctl disable "$SERVICE_NAME"
-            rm -f "$SCRIPT_PATH" "$SERVICE_FILE" "$TIMER_FILE"
-            systemctl daemon-reload
-            echo "✅ 已卸载 $SERVICE_NAME"
-            exit 0
-            ;;
-        r|R)
-            echo "⚡ 重新安装..."
-            ;;
-        *)
-            echo "❌ 退出，不做修改"
-            exit 0
-            ;;
-    esac
-fi
+                echo "[2/5] 删除服务、定时器和脚本..."
+                rm -f "$SERVICE_FILE" "$TIMER_SERVICE_FILE" "$TIMER_UNIT_FILE" "$SCRIPT_FILE" "$LOG_FILE"
 
-# 生成守护脚本
-cat > "$SCRIPT_PATH" <<'EOF'
-#!/bin/bash
-LOG_DIR="/root/snat_logs"
-LOG_FILE="$LOG_DIR/auto-snat.log"
+                echo "[3/5] 重新加载 systemd..."
+                systemctl daemon-reload
 
-log() {
-    echo "$(date '+%F %T') - $1" >> "$LOG_FILE"
-    tail -n50 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
-    if [ $(stat -c%s "$LOG_FILE") -gt 1048576 ]; then
-        mv "$LOG_FILE" "$LOG_FILE.old"
-        touch "$LOG_FILE"
-    fi
-}
-
-update_snat() {
-    TUNX_IP=$(ip -4 addr show tunx | grep -oP 'inet \K[\d.]+')
-    TUNX_NET="${TUNX_IP%.*}.0/24"
-    ETH0_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
-
-    # 获取现有规则目标 IP
-    CURRENT_TARGET=$(iptables -t nat -S POSTROUTING | grep "^-A POSTROUTING -s $TUNX_NET -o eth0 -j SNAT" | head -n1 | grep -oP '(?<=--to-source )[\d.]+')
-
-    if [ "$CURRENT_TARGET" = "$ETH0_IP" ]; then
-        log "信息: SNAT规则已是最新 (目标IP: $ETH0_IP)"
-        return 0
-    fi
-
-    # 删除旧规则
-    for RULE in $(iptables -t nat -S POSTROUTING | grep "^-A POSTROUTING -s $TUNX_NET -o eth0 -j SNAT"); do
-        iptables -t nat ${RULE/-A /-D }
-    done
-
-    # 添加新规则
-    iptables -t nat -A POSTROUTING -s "$TUNX_NET" -o eth0 -j SNAT --to-source "$ETH0_IP"
-    iptables-save > /etc/iptables/rules.v4
-    log "操作: 更新 SNAT 规则: $TUNX_NET -> $ETH0_IP"
-}
-
-update_snat
-EOF
-
-chmod +x "$SCRIPT_PATH"
-
-# 创建 systemd service
-cat > "$SERVICE_FILE" <<EOF
+                echo "✅ 卸载完成"
+                exit 0
+                ;;
+            *)
+                echo "❌ 已取消卸载"
+                exit 0
+                ;;
+        esac
+    else
+        echo "⚠ 检测到缺少定时器配置"
+        read -p "是否要修复添加定时器? (y/N): " fix_choice
+        case "$fix_choice" in
+            y|Y)
+                echo "🔧 正在修复定时器..."
+                # 创建定时器任务
+                cat > "$TIMER_UNIT_FILE" <<EOF
 [Unit]
-Description=Auto SNAT Daemon
-After=network.target
+Description=Sync Time to Beijing Time every 4 minutes
 
 [Service]
 Type=oneshot
-ExecStart=$SCRIPT_PATH
+ExecStart=$SCRIPT_FILE
 EOF
 
-# 创建 systemd timer
-cat > "$TIMER_FILE" <<EOF
+                # 创建定时器配置
+                cat > "$TIMER_SERVICE_FILE" <<EOF
 [Unit]
-Description=Run $SERVICE_NAME every $INTERVAL_MIN minutes
+Description=Run sync-time-task every 4 minutes
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=$((INTERVAL_MIN * 60))s
+OnUnitActiveSec=4min
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF
 
+                systemctl daemon-reload
+                systemctl enable sync-time.timer
+                systemctl start sync-time.timer
+                echo "✅ 定时器修复完成"
+                exit 0
+                ;;
+            *)
+                echo "❌ 已取消修复"
+                exit 0
+                ;;
+        esac
+    fi
+fi
+
+echo "=== 开始安装并设置开机自动同步北京时间 + 每4分钟定时同步 ==="
+
+# 1. 安装 ntpdate
+if ! command -v ntpdate >/dev/null 2>&1; then
+    echo "[1/6] 正在安装 ntpdate..."
+    apt update && apt install -y ntpdate
+else
+    echo "[1/6] ntpdate 已安装"
+fi
+
+# 2. 设置时区
+echo "[2/6] 设置时区为 Asia/Shanghai..."
+timedatectl set-timezone Asia/Shanghai
+
+# 3. 创建同步脚本
+echo "[3/6] 创建同步脚本 $SCRIPT_FILE ..."
+cat > "$SCRIPT_FILE" <<EOF
+#!/bin/bash
+# 同步北京时间脚本
+sleep 10  # 延迟10秒，确保网络已连接
+{
+    echo "==== [\$(date '+%Y-%m-%d %H:%M:%S')] 同步北京时间 ===="
+    /usr/sbin/ntpdate -u ntp.aliyun.com
+} >> "$LOG_FILE" 2>&1
+
+# 保留最近 50 行日志
+if [[ -f "$LOG_FILE" ]]; then
+    lines=\$(wc -l < "$LOG_FILE")
+    if (( lines > 50 )); then
+        tail -n 50 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+    fi
+fi
+EOF
+chmod +x "$SCRIPT_FILE"
+
+# 4. 创建开机服务
+echo "[4/6] 创建 systemd 开机服务 $SERVICE_FILE ..."
+cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Sync Time to Beijing Time at Startup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_FILE
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 5. 创建定时任务服务
+cat > "$TIMER_UNIT_FILE" <<EOF
+[Unit]
+Description=Sync Time to Beijing Time every 4 minutes
+
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_FILE
+EOF
+
+# 6. 创建定时器
+cat > "$TIMER_SERVICE_FILE" <<EOF
+[Unit]
+Description=Run sync-time-task every 4 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=4min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# 启用并启动
 systemctl daemon-reload
-systemctl enable --now "$TIMER_FILE"
-systemctl start "$SERVICE_NAME"
+systemctl enable sync-time.service
+systemctl start sync-time.service
+systemctl enable sync-time.timer
+systemctl start sync-time.timer
 
-# 首次立即执行一次
-bash "$SCRIPT_PATH"
-
-echo "✔ 安装完成并已立即执行一次 SNAT 更新"
-echo "服务名称: $SERVICE_NAME"
-echo "日志目录: $LOG_DIR"
-echo "执行间隔: $INTERVAL_MIN 分钟"
-echo "卸载/更新：重新运行本安装脚本"
-echo
-systemctl list-timers | grep "$SERVICE_NAME"
+echo "=== 安装完成 ==="
+date -R
